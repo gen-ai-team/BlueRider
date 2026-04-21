@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>image_gen — выставка</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="app" class="app">
+
+    <!-- LEFT: hero + current thoughts -->
+    <main class="stage">
+
+      <section class="hero" id="hero">
+        <div class="hero-frame" id="hero-frame" role="button" tabindex="0"
+             title="Открыть во весь экран" aria-label="Открыть во весь экран">
+          <img id="hero-img" alt="" />
+          <div class="hero-shade"></div>
+          <div class="hero-caption">
+            <div class="hero-kicker">
+              <span id="hero-series" class="series-tag">—</span>
+              <span id="hero-iter" class="iter-tag">—</span>
+            </div>
+            <h1 id="hero-title" class="hero-title">—</h1>
+          </div>
+          <div class="hero-expand" aria-hidden="true">⤢</div>
+        </div>
+      </section>
+
+      <section class="statusbar" id="statusbar">
+        <div class="status-main">
+          <div class="status-head">
+            <div class="status-text">
+              <div class="status-indicator">
+                <div class="status-dot" id="status-dot" title="живой процесс"></div>
+                <span class="status-label">Процесс</span>
+              </div>
+              <span id="status-line">—</span>
+            </div>
+            <div class="status-stats" id="status-stats">—</div>
+          </div>
+          <div class="status-progress" aria-hidden="true">
+            <div class="status-progress-bar" id="status-progress-bar"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="thoughts">
+        <h2 class="section-title">Мысли художника <span class="section-sub">о текущей работе</span></h2>
+        <div class="thoughts-grid">
+          <article class="thought">
+            <h3>Что я вижу</h3>
+            <p id="t-see">—</p>
+          </article>
+          <article class="thought">
+            <h3>Что звучит</h3>
+            <p id="t-resonates">—</p>
+          </article>
+          <article class="thought">
+            <h3>Что молчит</h3>
+            <p id="t-silent">—</p>
+          </article>
+          <article class="thought accent">
+            <h3>Куда дальше</h3>
+            <p id="t-next">—</p>
+          </article>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- RIGHT: path + done series -->
+    <aside class="rail">
+
+      <section class="path" id="path">
+        <h2 class="section-title">Путь художника</h2>
+        <div class="path-body" id="path-body">
+          <p class="muted">путь ещё не сформирован…</p>
+        </div>
+      </section>
+
+      <section class="series">
+        <h2 class="section-title">
+          Серии
+          <span class="section-sub">от новых к старым</span>
+        </h2>
+        <div class="series-list" id="series-list">
+          <p class="muted">пока ничего не закрыто…</p>
+        </div>
+      </section>
+
+    </aside>
+
+  </div>
+
+  <!-- =============================================================== -->
+  <!-- Fullscreen viewer overlay (hidden by default)                    -->
+  <!-- =============================================================== -->
+  <div id="viewer" class="viewer" hidden aria-hidden="true" role="dialog" aria-modal="true">
+
+    <!-- Top bar: mode-dependent title + close                          -->
+    <header class="viewer-top">
+      <div class="viewer-crumb">
+        <span id="v-crumb-series" class="series-tag">—</span>
+        <span id="v-crumb-iter" class="iter-tag">—</span>
+      </div>
+      <div class="viewer-actions">
+        <button type="button" class="viewer-btn" id="v-series-btn"
+                title="К серии (S)">Серия</button>
+        <button type="button" class="viewer-btn" id="v-close"
+                title="Закрыть (Esc)" aria-label="Закрыть">✕</button>
+      </div>
+    </header>
+
+    <!-- Single-work mode ============================================= -->
+    <section class="viewer-work" id="viewer-work" hidden>
+      <div class="vw-image-wrap">
+        <button type="button" class="vw-nav vw-prev" id="v-prev"
+                title="Предыдущее (←)" aria-label="Предыдущее">‹</button>
+        <img id="v-img" alt="" />
+        <button type="button" class="vw-nav vw-next" id="v-next"
+                title="Следующее (→)" aria-label="Следующее">›</button>
+      </div>
+
+      <aside class="vw-side" id="v-side">
+        <h2 class="vw-title" id="v-title">—</h2>
+        <div class="vw-meta" id="v-meta">—</div>
+
+        <div class="vw-thoughts">
+          <article class="thought">
+            <h3>Что я вижу</h3>
+            <p id="v-see">—</p>
+          </article>
+          <article class="thought">
+            <h3>Что звучит</h3>
+            <p id="v-resonates">—</p>
+          </article>
+          <article class="thought">
+            <h3>Что молчит</h3>
+            <p id="v-silent">—</p>
+          </article>
+          <article class="thought accent">
+            <h3>Куда дальше</h3>
+            <p id="v-next-text">—</p>
+          </article>
+        </div>
+      </aside>
+
+      <!-- Bottom strip: all works of the current series                -->
+      <footer class="vw-strip" id="v-strip"></footer>
+    </section>
+
+    <!-- Series-overview mode ========================================= -->
+    <section class="viewer-series" id="viewer-series" hidden>
+      <header class="vs-head">
+        <div class="vs-head-top">
+          <span class="series-status-chip" id="vs-status">—</span>
+          <span class="vs-count" id="vs-count">—</span>
+        </div>
+        <h2 class="vs-name" id="vs-name">—</h2>
+        <p class="vs-thesis" id="vs-thesis">—</p>
+      </header>
+
+      <div class="vs-retro" id="vs-retro" hidden>
+        <h3 class="vs-retro-title" id="vs-retro-title">—</h3>
+        <p class="vs-retro-arc" id="vs-retro-arc">—</p>
+        <dl class="vs-retro-list" id="vs-retro-list"></dl>
+      </div>
+
+      <div class="vs-grid" id="vs-grid"></div>
+    </section>
+
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
