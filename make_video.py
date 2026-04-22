@@ -364,7 +364,13 @@ def _render_caption_overlay(
     sb = d.textbbox((0, 0), series_txt, font=tag_font)
     tw, th = sb[2] - sb[0], sb[3] - sb[1]
     pill = (cap_px, kicker_y, cap_px + tw + 2 * pad_px_x, kicker_y + th + 2 * pad_px_y)
-    _rounded_rect(d, pill, radius=9999, outline=(*SERIES_BLUE, 200), width=2)
+    _rounded_rect(
+        d,
+        pill,
+        radius=max(4, int(tag_font.size * 0.35)),
+        outline=(*SERIES_BLUE, 200),
+        width=2,
+    )
     d.text(
         (cap_px + pad_px_x, kicker_y + pad_px_y - 1),
         series_txt,
@@ -373,7 +379,7 @@ def _render_caption_overlay(
     )
 
     iter_txt = (
-        f"СЕРИЯ {series_idx} / {series_total}  ·  #{iter_num:03d}"
+        f"КАРТИНА {series_idx} / {series_total}  ·  #{iter_num:03d}"
         if series_total
         else f"#{iter_num:03d}"
     )
@@ -609,15 +615,23 @@ def render_transition_frame(
     morphed_photo: Image.Image,
     t: float,
     *,
+    text_t: float | None = None,
     zoom: float = 1.0,
 ) -> Image.Image:
+    """
+    `t`      drives the image-panel morph/zoom (artistic, full easing).
+    `text_t` drives caption + side-panel crossfade (mechanical snap).
+             Defaults to `t` for backward compat.
+    """
+    if text_t is None:
+        text_t = t
     base = Image.new("RGB", (layout.W, layout.H), BG)
 
     ix0, iy0, ix1, iy1 = layout.img_box
     box_w, box_h = ix1 - ix0, iy1 - iy0
     panel = _render_image_panel_base(morphed_photo, box_w, box_h, zoom=zoom)
     captions: list[Image.Image] = []
-    if t < 1.0:
+    if text_t < 1.0:
         captions.append(
             _render_caption_overlay(
                 box_w,
@@ -627,10 +641,10 @@ def render_transition_frame(
                 series_total=a.series_total,
                 iter_num=a.number,
                 title=a.title,
-                alpha=1.0 - t,
+                alpha=1.0 - text_t,
             )
         )
-    if t > 0.0:
+    if text_t > 0.0:
         captions.append(
             _render_caption_overlay(
                 box_w,
@@ -640,7 +654,7 @@ def render_transition_frame(
                 series_total=b.series_total,
                 iter_num=b.number,
                 title=b.title,
-                alpha=t,
+                alpha=text_t,
             )
         )
     _blit_image_panel(base, panel, captions, layout)
@@ -648,10 +662,10 @@ def render_transition_frame(
     sx0, sy0, sx1, sy1 = layout.side_box
     sw, sh = sx1 - sx0, sy1 - sy0
     side_layers: list[Image.Image] = []
-    if t < 1.0:
-        side_layers.append(_render_side_panel(sw, sh, a, alpha=1.0 - t))
-    if t > 0.0:
-        side_layers.append(_render_side_panel(sw, sh, b, alpha=t))
+    if text_t < 1.0:
+        side_layers.append(_render_side_panel(sw, sh, a, alpha=1.0 - text_t))
+    if text_t > 0.0:
+        side_layers.append(_render_side_panel(sw, sh, b, alpha=text_t))
     _blit_side_panel(base, side_layers, layout)
     return base
 
@@ -743,6 +757,22 @@ def ease_in_out(t: float) -> float:
     return t * t * (3 - 2 * t)
 
 
+def snap_crossfade(t: float, *, start: float = 0.40, end: float = 0.70) -> float:
+    """
+    Mechanical, late-and-fast text crossfade. Text stays fully on A until
+    `start` of the transition window, hard-dissolves to B between `start`
+    and `end`, then sits fully on B. Produces a crisp UI cut while the
+    image keeps morphing around it.
+    """
+    if t <= start:
+        return 0.0
+    if t >= end:
+        return 1.0
+    x = (t - start) / (end - start)
+    # light smoothstep so the cut isn't *completely* binary on slow fps
+    return x * x * (3 - 2 * x)
+
+
 def make_video(
     items: list[Iteration],
     out_path: Path,
@@ -817,7 +847,8 @@ def make_video(
             return np.array(img)
         _, i, sub = state
         t = sub / max(1, trans_frames)
-        te = ease_in_out(t)
+        te = ease_in_out(t)  # artistic image morph
+        tt = snap_crossfade(t)  # mechanical text swap
         _, _, fab, fba = get_flows(i)
         a_bgr = _to_cv(photos[i])
         b_bgr = _to_cv(photos[i + 1])
@@ -825,7 +856,13 @@ def make_video(
         photo = _to_pil(blended)
         zoom = 1.035 * (1 - te) + 1.0 * te if ken_burns else 1.0
         img = render_transition_frame(
-            layout, items[i], items[i + 1], photo, te, zoom=zoom
+            layout,
+            items[i],
+            items[i + 1],
+            photo,
+            te,
+            text_t=tt,
+            zoom=zoom,
         )
         return np.array(img)
 
