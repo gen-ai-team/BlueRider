@@ -4,6 +4,7 @@
 #     "openai>=1.40",
 #     "python-dotenv>=1.0",
 #     "pillow>=10",
+#     "numpy>=1.24",
 # ]
 # ///
 """
@@ -50,6 +51,7 @@ from typing import Any
 from dotenv import load_dotenv
 from openai import OpenAI
 from PIL import Image
+import numpy as np
 
 # --------------------------------------------------------------------------- #
 # configuration
@@ -62,6 +64,7 @@ PROMPT_PATH = REPO_ROOT / "prompt.md"
 OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", REPO_ROOT / "output")).resolve()
 
 ART_SCRIPT = OUTPUT_DIR / "art.py"
+SCRIPTS_DIR = OUTPUT_DIR / "scripts"
 DIARY_PATH = OUTPUT_DIR / "exhibition_diary.md"
 PATH_MD = OUTPUT_DIR / "artistic_path.md"
 LOG_PATH = OUTPUT_DIR / "run.log"
@@ -80,10 +83,24 @@ LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "180"))
 
 # series policy
 MIN_SERIES_LEN = int(os.getenv("MIN_SERIES_LEN", "7"))
-SOFT_MAX_SERIES_LEN = int(os.getenv("SOFT_MAX_SERIES_LEN", "15"))
-HARD_MAX_SERIES_LEN = int(os.getenv("HARD_MAX_SERIES_LEN", "18"))
-# rewrite artistic_path roughly every N iterations (also on every series change)
-PATH_REWRITE_EVERY = 6
+SOFT_MAX_SERIES_LEN = int(os.getenv("SOFT_MAX_SERIES_LEN", "12"))
+HARD_MAX_SERIES_LEN = int(os.getenv("HARD_MAX_SERIES_LEN", "15"))
+# path.json used to be rewritten every N iterations. That turned into an echo
+# chamber (the model only ever ratcheted the current tendency tighter). Now
+# path.json is rewritten only on series boundaries (close/open) and at very
+# first iteration. Setting PATH_REWRITE_EVERY>0 re-enables the periodic rewrite
+# for backward compatibility, but the default is "only on boundary".
+PATH_REWRITE_EVERY = int(os.getenv("PATH_REWRITE_EVERY", "0"))
+
+# how many recent images we show to step 1 as visual memory of the current
+# series (in addition to the single latest one). 0 disables the survey.
+STEP1_SERIES_SURVEY = int(os.getenv("STEP1_SERIES_SURVEY", "2"))
+# how many past-series "last frame" images we show to step 1 when the iter is
+# the first of a new series (to force cross-series visual differentiation).
+STEP1_PAST_SERIES_SURVEY = int(os.getenv("STEP1_PAST_SERIES_SURVEY", "4"))
+# rolling window over which the harness computes visual-similarity scores and
+# surfaces them to steps 3/4/1 so the model can react to repetition.
+SIMILARITY_WINDOW = int(os.getenv("SIMILARITY_WINDOW", "6"))
 
 
 def _resolve_art_python() -> str:
@@ -147,6 +164,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 ITER_DIR.mkdir(parents=True, exist_ok=True)
 DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -237,7 +255,110 @@ def _obj(
 SCHEMA_STEP3 = {
     "name": "Observation",
     "strict": True,
-    "schema": _obj({"observation": {"type": "string"}}),
+    "schema": _obj(
+        {
+            # --- enum-constrained axes (machine-comparable between iterations) ---
+            "composition": {
+                "type": "string",
+                "enum": [
+                    "centered",
+                    "rule_of_thirds",
+                    "grid",
+                    "scattered",
+                    "field",
+                    "diagonal",
+                    "spiral",
+                    "radial",
+                    "layered",
+                    "other",
+                ],
+            },
+            "shape_family": {
+                "type": "string",
+                "enum": [
+                    "circle",
+                    "line",
+                    "polygon",
+                    "curve",
+                    "blob",
+                    "noise",
+                    "lattice",
+                    "dot",
+                    "mixed",
+                    "other",
+                ],
+            },
+            "density": {
+                "type": "string",
+                "enum": ["empty", "sparse", "medium", "dense", "saturated"],
+            },
+            "symmetry": {
+                "type": "string",
+                "enum": [
+                    "none",
+                    "bilateral",
+                    "radial",
+                    "rotational",
+                    "translational",
+                    "mixed",
+                ],
+            },
+            "element_count": {
+                "type": "string",
+                "enum": ["1", "2-5", "6-20", "20-100", ">100", "field"],
+            },
+            "negative_space": {
+                "type": "string",
+                "enum": ["none", "low", "medium", "high", "dominant"],
+            },
+            "uses_blur_or_glow": {"type": "boolean"},
+            "similarity_to_previous": {
+                "type": "string",
+                "enum": ["novel", "mild_repeat", "strong_repeat"],
+                "description": "How close this work is to the immediately "
+                "preceding one (palette + composition + shape_family + "
+                "density together). 'novel' = clearly different along at "
+                "least one axis; 'strong_repeat' = could be mistaken for it.",
+            },
+            # --- free-text fields (what enums can't capture) ---
+            "palette": {
+                "type": "string",
+                "description": "2–4 colours that carry the piece, named or "
+                "with approximate hex, plus their role "
+                "(background/dominant/accent/etc). Max ~30 words.",
+            },
+            "observation": {
+                "type": "string",
+                "description": "5–8 строк честного описания того, что ты "
+                "видишь — композиция, ритм, текстура, что получилось, что "
+                "нет. Опирайся и на картинку, и на знание кода.",
+            },
+            "what_works": {
+                "type": "string",
+                "description": "1–2 sentences: the single strongest thing "
+                "about this image.",
+            },
+            "what_fails": {
+                "type": "string",
+                "description": "1–2 sentences: the single weakest thing, or "
+                "what feels accidental / unintended.",
+            },
+        },
+        required=[
+            "composition",
+            "shape_family",
+            "density",
+            "symmetry",
+            "element_count",
+            "negative_space",
+            "uses_blur_or_glow",
+            "similarity_to_previous",
+            "palette",
+            "observation",
+            "what_works",
+            "what_fails",
+        ],
+    ),
 }
 
 SCHEMA_STEP4 = {
@@ -250,6 +371,21 @@ SCHEMA_STEP4 = {
             "what_resonates": {"type": "string"},
             "what_is_silent": {"type": "string"},
             "where_next": {"type": "string"},
+            # explicit acknowledgement of the harness-computed similarity
+            # score for this image vs recent ones. Forces the model to react
+            # to visual repetition rather than verbally paper over it.
+            "repetition_check": {
+                "type": "string",
+                "enum": ["novel", "mild_repeat", "strong_repeat"],
+            },
+            "repetition_note": {
+                "type": "string",
+                "description": "1 sentence. If strong_repeat/mild_repeat — "
+                "what exactly is repeating (palette? composition? same "
+                "silhouette?) and what the next iteration will change to "
+                "break out. If novel — what was the concrete change that "
+                "made it novel.",
+            },
             "series_status": {"type": "string", "enum": ["continue", "close"]},
             "closed_reason": {"type": ["string", "null"]},
             "proposed_next_series": {
@@ -259,7 +395,45 @@ SCHEMA_STEP4 = {
                         {
                             "name": {"type": "string"},
                             "thesis": {"type": "string"},
-                        }
+                            # force explicit commitment to what makes the new
+                            # series visually different from everything done
+                            # before. "verbal difference" alone is not enough.
+                            "must_differ_from_previous_in": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "enum": [
+                                        "palette",
+                                        "composition",
+                                        "shape_family",
+                                        "density",
+                                        "symmetry",
+                                        "algorithmic_kernel",
+                                        "scale",
+                                        "texture",
+                                    ],
+                                },
+                                "minItems": 2,
+                                "description": "At least two axes on which "
+                                "the new series must visibly break with "
+                                "prior series. Not a wish — a contract.",
+                            },
+                            "forbidden_features": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Concrete things the new "
+                                "series must NOT contain (e.g. 'ochre-on-"
+                                "indigo palette', 'central medallion', "
+                                "'gaussian glow', 'voronoi rendering'). "
+                                "Each item one short phrase.",
+                            },
+                        },
+                        required=[
+                            "name",
+                            "thesis",
+                            "must_differ_from_previous_in",
+                            "forbidden_features",
+                        ],
                     ),
                 ],
             },
@@ -270,6 +444,8 @@ SCHEMA_STEP4 = {
             "what_resonates",
             "what_is_silent",
             "where_next",
+            "repetition_check",
+            "repetition_note",
             "series_status",
             "closed_reason",
             "proposed_next_series",
@@ -336,6 +512,12 @@ class Series:
     # {title, arc_summary, what_emerged, what_disappointed, verdict,
     #  bridge_to_next}
     retrospective: dict | None = None
+    # Cross-series contract set at series open: which axes this series
+    # commits to differ from every prior series on, and which concrete
+    # features are explicitly forbidden. Forces real differentiation rather
+    # than verbal repainting.
+    must_differ_from_previous_in: list[str] = field(default_factory=list)
+    forbidden_features: list[str] = field(default_factory=list)
 
     def is_open(self) -> bool:
         return self.closed_at is None
@@ -353,6 +535,8 @@ class Series:
             "closed_at": self.closed_at,
             "closed_reason": self.closed_reason,
             "retrospective": self.retrospective,
+            "must_differ_from_previous_in": list(self.must_differ_from_previous_in),
+            "forbidden_features": list(self.forbidden_features),
         }
 
     @staticmethod
@@ -366,6 +550,10 @@ class Series:
             closed_at=d.get("closed_at"),
             closed_reason=d.get("closed_reason"),
             retrospective=d.get("retrospective"),
+            must_differ_from_previous_in=list(
+                d.get("must_differ_from_previous_in", [])
+            ),
+            forbidden_features=list(d.get("forbidden_features", [])),
         )
 
 
@@ -436,9 +624,24 @@ class State:
         ]
 
     # -- mutations --
-    def open_series(self, name: str, thesis: str, at_iter: int) -> Series:
+    def open_series(
+        self,
+        name: str,
+        thesis: str,
+        at_iter: int,
+        *,
+        must_differ_from_previous_in: list[str] | None = None,
+        forbidden_features: list[str] | None = None,
+    ) -> Series:
         new_id = (self.series[-1].id + 1) if self.series else 1
-        s = Series(id=new_id, name=name, thesis=thesis, opened_at=at_iter)
+        s = Series(
+            id=new_id,
+            name=name,
+            thesis=thesis,
+            opened_at=at_iter,
+            must_differ_from_previous_in=list(must_differ_from_previous_in or []),
+            forbidden_features=list(forbidden_features or []),
+        )
         self.series.append(s)
         self.save_series()
         log.info("opened series #%d: «%s»", s.id, s.name)
@@ -502,6 +705,119 @@ def encode_image_downscaled(path: Path, size: int = 512, quality: int = 85) -> s
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+# --------------------------------------------------------------------------- #
+# perceptual similarity (pillow+numpy only)
+# --------------------------------------------------------------------------- #
+# Fingerprint = (dhash_bits, color_histogram). We store them on the iter_json
+# so we never have to recompute for historical images. Comparing is cheap:
+#   dhash   : 16×16 grayscale → horizontal-gradient bits (256 bits), hamming
+#             distance normalized to [0,1]; 0 means identical structure.
+#   colhist : 4×4×4 RGB histogram (64 bins) normalized; L1 distance / 2 in
+#             [0,1]; 0 means identical colour distribution.
+# "similarity" in [0,1] is 1 - weighted distance.
+
+
+def _dhash_bits(img: Image.Image, size: int = 16) -> str:
+    """Return a 256-bit hex string (difference hash). `size` controls bits."""
+    gs = img.convert("L").resize((size + 1, size), Image.LANCZOS)
+    a = np.asarray(gs, dtype=np.int16)
+    diff = a[:, 1:] > a[:, :-1]  # shape (size, size)
+    bits = np.packbits(diff.flatten())
+    return bits.tobytes().hex()
+
+
+def _color_hist(img: Image.Image, bins_per_channel: int = 4) -> list[float]:
+    """Return a normalized 4×4×4 = 64-bin RGB histogram as a list of floats."""
+    small = img.convert("RGB").resize((96, 96), Image.LANCZOS)
+    a = np.asarray(small, dtype=np.uint8)
+    # quantize each channel to `bins_per_channel`
+    b = (a.astype(np.int32) * bins_per_channel // 256).clip(0, bins_per_channel - 1)
+    flat = b[..., 0] * bins_per_channel * bins_per_channel + (
+        b[..., 1] * bins_per_channel + b[..., 2]
+    )
+    hist = np.bincount(flat.ravel(), minlength=bins_per_channel**3).astype(np.float32)
+    total = float(hist.sum()) or 1.0
+    return (hist / total).tolist()
+
+
+def compute_fingerprint(path: Path) -> dict:
+    with Image.open(path) as im:
+        return {
+            "dhash": _dhash_bits(im),
+            "colhist": _color_hist(im),
+        }
+
+
+def _hamming_dist_hex(a: str, b: str) -> int:
+    """Hamming distance in bits between two equal-length hex strings."""
+    if len(a) != len(b):
+        return max(len(a), len(b)) * 4
+    xa = int(a, 16)
+    xb = int(b, 16)
+    return bin(xa ^ xb).count("1")
+
+
+def _l1_dist(a: list[float], b: list[float]) -> float:
+    la, lb = np.asarray(a, dtype=np.float32), np.asarray(b, dtype=np.float32)
+    if la.shape != lb.shape:
+        return 1.0
+    return float(np.abs(la - lb).sum() / 2.0)  # in [0,1]
+
+
+def similarity(fp_a: dict | None, fp_b: dict | None) -> float:
+    """Return a similarity score in [0,1]. 1.0 = identical.
+
+    Weights structural (dhash) and colour (histogram) distances equally.
+    None fingerprints → 0.0 (treat as totally different / unknown).
+    """
+    if not fp_a or not fp_b:
+        return 0.0
+    dh_bits = 16 * 16  # 256 bits from our dhash
+    dh_raw = _hamming_dist_hex(fp_a["dhash"], fp_b["dhash"])
+    dh = dh_raw / dh_bits  # 0..1
+    ch = _l1_dist(fp_a["colhist"], fp_b["colhist"])  # 0..1
+    dist = 0.5 * dh + 0.5 * ch
+    return max(0.0, min(1.0, 1.0 - dist))
+
+
+def similarity_bucket(sim: float) -> str:
+    """Map a similarity score to the enum used in step-3 / step-4 schemas."""
+    if sim >= 0.80:
+        return "strong_repeat"
+    if sim >= 0.60:
+        return "mild_repeat"
+    return "novel"
+
+
+# --------------------------------------------------------------------------- #
+# art.py provenance helpers
+# --------------------------------------------------------------------------- #
+
+
+_PRESERVED_RE = re.compile(r"^#\s*Preserved:\s*(.+)$", re.MULTILINE)
+_MUTATED_RE = re.compile(r"^#\s*Mutated:\s*(.+)$", re.MULTILINE)
+
+
+def parse_art_py_metadata(src: str) -> dict:
+    """Pull `Preserved:` and `Mutated:` comment lines out of an art.py header.
+    Returns empty strings when absent."""
+    pres = _PRESERVED_RE.search(src)
+    muts = _MUTATED_RE.search(src)
+    return {
+        "preserved": pres.group(1).strip() if pres else "",
+        "mutated": muts.group(1).strip() if muts else "",
+    }
+
+
+def archive_art_script(n: int, src: str) -> Path:
+    """Persist this iteration's script as scripts/art_NNN.py alongside the
+    rendered PNG. The top-level art.py stays as the "latest" for readability
+    and as the source the fixer reads on retry."""
+    target = SCRIPTS_DIR / f"art_{n:03d}.py"
+    target.write_text(src, encoding="utf-8")
+    return target
+
+
 def load_path_json() -> dict | None:
     if not PATH_JSON.exists():
         return None
@@ -547,7 +863,7 @@ def _llm_raw(
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        # "temperature": temperature,
+        "temperature": temperature,
         "max_tokens": max_tokens,
     }
     if response_format is not None:
@@ -844,40 +1160,269 @@ class Ctx:
     path_obj: dict | None
 
 
+def _pick_series_survey_pngs(state: State, cur: Series, k: int) -> list[Path]:
+    """Return up to k in-series reference images (first, middle picks) to
+    show the model alongside the immediately previous image. Always excludes
+    the very last iteration (which is handed to step 1 separately and will
+    be the model's primary visual anchor).
+    """
+    if k <= 0 or cur is None or len(cur.iterations) < 2:
+        return []
+    iters = list(cur.iterations)[:-1]  # exclude most recent
+    if not iters:
+        return []
+    # spread picks across the series: first, middle, etc.
+    if k == 1:
+        picks = [iters[0]]
+    else:
+        idxs = np.linspace(0, len(iters) - 1, num=k).round().astype(int)
+        picks = [iters[int(i)] for i in idxs]
+    # preserve order, de-dup
+    seen: set[int] = set()
+    out: list[Path] = []
+    for n in picks:
+        if n in seen:
+            continue
+        seen.add(n)
+        p = OUTPUT_DIR / f"art_{n:03d}.png"
+        if p.exists():
+            out.append(p)
+    return out
+
+
+def _pick_past_series_closers(state: State, k: int) -> list[tuple[Series, Path]]:
+    """Return the last rendered image of each closed series (up to k most
+    recent closed series). Used to force cross-series visual differentiation
+    on the first iteration of a new series.
+    """
+    if k <= 0:
+        return []
+    closed = [s for s in state.series if not s.is_open()]
+    out: list[tuple[Series, Path]] = []
+    for s in closed[-k:]:
+        if not s.iterations:
+            continue
+        last = s.iterations[-1]
+        p = OUTPUT_DIR / f"art_{last:03d}.png"
+        if p.exists():
+            out.append((s, p))
+    return out
+
+
+def _similarity_survey(state: State, window: int = SIMILARITY_WINDOW) -> str:
+    """Return a short human-readable block about how visually similar the
+    last `window` iterations are to each other. Blank string when there
+    aren't enough datapoints yet.
+    """
+    nums = sorted(state.iterations.keys())[-window:]
+    if len(nums) < 3:
+        return ""
+    fps: list[tuple[int, dict | None]] = []
+    for n in nums:
+        it = state.iterations.get(n)
+        fp = it.get("fingerprint") if it else None
+        fps.append((n, fp))
+    # consecutive pairs
+    rows: list[str] = []
+    for (na, fa), (nb, fb) in zip(fps, fps[1:]):
+        sim = similarity(fa, fb)
+        rows.append(
+            f"  - {na:03d} → {nb:03d}: sim={sim:.2f} ({similarity_bucket(sim)})"
+        )
+    # avg similarity to the latest work
+    if fps[-1][1] is not None:
+        avgs: list[float] = []
+        for n, fp in fps[:-1]:
+            avgs.append(similarity(fps[-1][1], fp))
+        if avgs:
+            rows.append(
+                f"  - avg sim of {fps[-1][0]:03d} to previous "
+                f"{len(avgs)} works: {sum(avgs) / len(avgs):.2f}"
+            )
+    return "\n".join(rows)
+
+
 def step1_create(ctx: Ctx) -> None:
     log.info("step 1/6 — create art.py (iteration %03d)", ctx.n)
     prev_art = read_text(
         ART_SCRIPT, default="(первая итерация, предыдущего скрипта нет)"
     )
+    prev_meta = (
+        parse_art_py_metadata(prev_art)
+        if prev_art
+        else {
+            "preserved": "",
+            "mutated": "",
+        }
+    )
     cur = ctx.state.current_series()
+    is_first_of_series = cur is not None and len(cur.iterations) == 0
     cur_block = (
         f"Текущая серия: #{cur.id} «{cur.name}» — {cur.thesis}"
         if cur
         else "Серии пока нет — эта работа откроет новую."
     )
-    user = (
+    # cross-series contract block — only meaningful once the series has one
+    contract_block = ""
+    if cur and (cur.must_differ_from_previous_in or cur.forbidden_features):
+        diff_line = (
+            ", ".join(cur.must_differ_from_previous_in)
+            if cur.must_differ_from_previous_in
+            else "—"
+        )
+        forb_lines = (
+            "\n".join(f"  - {f}" for f in cur.forbidden_features)
+            if cur.forbidden_features
+            else "  —"
+        )
+        contract_block = (
+            "\n\n## Контракт серии (заявленный при открытии)\n\n"
+            f"Должна отличаться от предыдущих серий по: **{diff_line}**.\n"
+            f"Запрещённые признаки (не использовать в этой серии):\n{forb_lines}"
+        )
+
+    # Preserved/Mutated from the previous iteration — surfaced explicitly so
+    # the model can't pretend it mutated something it kept. The rule: you
+    # cannot mutate the *same* axis two iterations in a row; if you want to
+    # keep changing it, you are in drift, not evolution.
+    prov_block = ""
+    if prev_meta["preserved"] or prev_meta["mutated"]:
+        prov_block = (
+            "\n\n## Родословная предыдущей работы\n\n"
+            f"- Preserved было: {prev_meta['preserved'] or '—'}\n"
+            f"- Mutated было: {prev_meta['mutated'] or '—'}\n"
+            "В этой итерации мутируй **другую** ось, не ту же, что в прошлый раз. "
+            "Иначе это не эволюция, а дрейф."
+        )
+
+    # Similarity survey — harness-computed, not model-self-reported.
+    sim_block = _similarity_survey(ctx.state)
+    sim_text = ""
+    if sim_block:
+        sim_text = (
+            "\n\n## Визуальная схожесть последних работ (по перцептуальному "
+            "хешу + цветовой гистограмме, 0 = разные, 1 = идентичные)\n"
+            f"{sim_block}\n"
+            "Если последние работы держатся на sim ≥ 0.80 — они фактически "
+            "одинаковы; слова о мутации не считаются, нужно сменить палитру, "
+            "композицию или алгоритмическое ядро."
+        )
+
+    # Build text section first, images second (vision payload).
+    text = (
         f"{_full_memory(ctx.state, ctx.path_obj)}\n\n"
         f"## Предыдущий art.py\n\n"
-        f"```python\n{prev_art[:12000]}\n```\n\n"
+        f"```python\n{prev_art[:12000]}\n```"
+        f"{prov_block}"
+        f"{contract_block}"
+        f"{sim_text}\n\n"
         f"## Задача — Шаг 1 (итерация {ctx.n:03d})\n\n"
         f"{cur_block}\n\n"
+        "Перед кодом ты увидишь изображения: предыдущую работу серии "
+        "и несколько опорных кадров. Если серия только открывается — "
+        "увидишь также последние кадры прошедших серий, от которых эта "
+        "новая серия должна заметно отличаться.\n\n"
         f"Напиши полный `art.py` для этой итерации. "
         f"Скрипт должен сохранить `art_{ctx.n:03d}.png` 1024×1024 в CWD. "
-        f"В начале файла — обязательные комментарии "
-        f"Iteration/Seed/Series/Preserved/Mutated.\n\n"
-        f"Ответь **только исходным кодом Python** — без JSON, без пояснений, "
-        f"без markdown-обёртки. Первая строка ответа должна быть первой "
-        f"строкой файла `art.py`."
+        "В начале файла — обязательные комментарии Iteration/Seed/Series/"
+        "Preserved/Mutated. В Preserved перечисли, что удерживается от "
+        "предыдущей работы; в Mutated — ровно ту ось, которую меняешь "
+        "сейчас (одну-две, не все сразу).\n\n"
+        "Ответь **только исходным кодом Python** — без JSON, без пояснений, "
+        "без markdown-обёртки. Первая строка ответа должна быть первой "
+        "строкой файла `art.py`."
     )
+
+    content: list[dict] = [{"type": "text", "text": text}]
+
+    # primary visual anchor: the previous rendered image
+    prev_png: Path | None = None
+    if ctx.state.iterations:
+        prev_n = max(ctx.state.iterations)
+        p = OUTPUT_DIR / f"art_{prev_n:03d}.png"
+        if p.exists():
+            prev_png = p
+    if prev_png is not None:
+        content.append(
+            {
+                "type": "text",
+                "text": f"Предыдущая работа — art_{prev_png.stem[-3:]}.png:",
+            }
+        )
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": encode_image_downscaled(prev_png, size=512)},
+            }
+        )
+
+    # in-series survey (excluding the last, which we just showed)
+    if cur is not None and STEP1_SERIES_SURVEY > 0:
+        survey = _pick_series_survey_pngs(ctx.state, cur, STEP1_SERIES_SURVEY)
+        if survey:
+            content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"Опорные кадры этой же серии (#{cur.id} «{cur.name}», "
+                        "для удержания её ДНК):"
+                    ),
+                }
+            )
+            for p in survey:
+                content.append({"type": "text", "text": f"  — {p.name}"})
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": encode_image_downscaled(p, size=384)},
+                    }
+                )
+
+    # at series boundary: show last frames of past series so the new series
+    # has to differ VISUALLY, not just verbally
+    if is_first_of_series and STEP1_PAST_SERIES_SURVEY > 0:
+        past = _pick_past_series_closers(ctx.state, STEP1_PAST_SERIES_SURVEY)
+        if past:
+            content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        "Последние кадры предыдущих серий — эта новая работа "
+                        "должна быть визуально отличима от каждого из них "
+                        "(не только по смыслу):"
+                    ),
+                }
+            )
+            for s, p in past:
+                content.append(
+                    {
+                        "type": "text",
+                        "text": f"  — серия #{s.id} «{s.name}», {p.name}",
+                    }
+                )
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": encode_image_downscaled(p, size=384)},
+                    }
+                )
+
     art_py = llm_text(
-        user,
+        content,
+        model=VISION_MODEL,
         temperature=0.95,
         max_tokens=12000,
         tag=f"step1_iter{ctx.n:03d}",
         expect_lang="python",
     )
     write_text(ART_SCRIPT, art_py)
-    log.info("    wrote %s (%d bytes)", ART_SCRIPT.name, len(art_py))
+    archive_art_script(ctx.n, art_py)
+    log.info(
+        "    wrote %s (%d bytes) + archived scripts/art_%03d.py",
+        ART_SCRIPT.name,
+        len(art_py),
+        ctx.n,
+    )
 
 
 def step2_render(ctx: Ctx) -> Path:
@@ -935,24 +1480,60 @@ def step2_render(ctx: Ctx) -> Path:
             expect_lang="python",
         )
         write_text(ART_SCRIPT, art_py)
+        archive_art_script(ctx.n, art_py)
         log.info("    applied fix attempt %d", attempt)
 
     raise RuntimeError("unreachable")
 
 
-def step3_observe(ctx: Ctx, png: Path) -> str:
+def step3_observe(ctx: Ctx, png: Path) -> dict:
+    """Returns the validated structured observation.
+
+    Shape matches SCHEMA_STEP3 — an enum-constrained visual audit plus a few
+    free-text fields (palette, observation, what_works, what_fails). The
+    result is persisted on the iteration record and the next iteration can
+    diff its own audit against this one to detect drift / repetition.
+    """
     log.info("step 3/6 — observe %s", png.name)
     art_src = read_text(ART_SCRIPT)[:4000]
+
+    # Harness-computed similarity to the previous rendered image. We hand
+    # the model the number so its own `similarity_to_previous` field is
+    # informed, not guessed.
+    sim_hint = ""
+    prev_fp: dict | None = None
+    prev_n: int | None = None
+    if ctx.state.iterations:
+        prev_n = max(ctx.state.iterations)
+        prev_it = ctx.state.iterations.get(prev_n)
+        prev_fp = prev_it.get("fingerprint") if prev_it else None
+    if prev_fp is not None:
+        this_fp = compute_fingerprint(png)
+        sim = similarity(this_fp, prev_fp)
+        sim_hint = (
+            f"\n\nХарнесс измерил визуальную схожесть этой работы с "
+            f"art_{prev_n:03d}.png: sim={sim:.2f} "
+            f"({similarity_bucket(sim)}). Используй это как ориентир для "
+            f"поля `similarity_to_previous`, но всё равно отвечай честно — "
+            f"ты видишь образы, а числа лишь подсказка."
+        )
+
     user = [
         {
             "type": "text",
             "text": (
                 f"{_full_memory(ctx.state, ctx.path_obj)}\n\n"
                 f"## Задача — Шаг 3 (итерация {ctx.n:03d})\n\n"
-                f"Посмотри на изображение. Верни JSON с одним полем "
-                f"`observation` (5–8 строк, честное описание: композиция, "
-                f"цвет, ритм, текстура, что получилось и что нет; не выдумывай "
-                f"деталей).\n\n"
+                "Посмотри на изображение и верни JSON строго по схеме "
+                "Observation:\n"
+                "- enum-поля (composition, shape_family, density, symmetry, "
+                "element_count, negative_space, uses_blur_or_glow, "
+                "similarity_to_previous) — короткие машиночитаемые ответы;\n"
+                "- palette — 2–4 цвета с ролями (фон/доминант/акцент);\n"
+                "- observation — 5–8 строк честного описания;\n"
+                "- what_works / what_fails — по 1–2 предложения.\n"
+                "Не выдумывай деталей, которых не видишь."
+                f"{sim_hint}\n\n"
                 f"Для справки — начало породившего кода:\n"
                 f"```python\n{art_src}\n```"
             ),
@@ -963,51 +1544,146 @@ def step3_observe(ctx: Ctx, png: Path) -> str:
         user,
         SCHEMA_STEP3,
         model=VISION_MODEL,
-        temperature=0.6,
-        max_tokens=2000,
+        temperature=0.5,
+        max_tokens=2500,
         tag=f"step3_iter{ctx.n:03d}",
     )
-    text = obj["observation"].strip()
-    log.info("    observation: %s", text.splitlines()[0][:120] if text else "(empty)")
-    return text
+    obs_text = (obj.get("observation") or "").strip()
+    log.info(
+        "    observation: comp=%s shape=%s density=%s sim=%s  | %s",
+        obj.get("composition"),
+        obj.get("shape_family"),
+        obj.get("density"),
+        obj.get("similarity_to_previous"),
+        obs_text.splitlines()[0][:80] if obs_text else "(empty)",
+    )
+    return obj
 
 
-def step4_diary(ctx: Ctx, observation: str) -> dict:
-    """Returns the validated diary entry (iteration-json shape)."""
+def _format_observation_for_diary(obs: dict) -> str:
+    """Render the structured step-3 observation into a compact block the
+    step-4 prompt can lean on."""
+    keys_enum = [
+        ("composition", "composition"),
+        ("shape_family", "shape_family"),
+        ("density", "density"),
+        ("symmetry", "symmetry"),
+        ("element_count", "element_count"),
+        ("negative_space", "negative_space"),
+        ("uses_blur_or_glow", "uses_blur_or_glow"),
+        ("similarity_to_previous", "similarity_to_previous"),
+    ]
+    lines: list[str] = []
+    for k, label in keys_enum:
+        if k in obs:
+            lines.append(f"- {label}: {obs[k]}")
+    if obs.get("palette"):
+        lines.append(f"- palette: {obs['palette']}")
+    if obs.get("observation"):
+        lines.append(f"\n{obs['observation'].strip()}")
+    if obs.get("what_works"):
+        lines.append(f"\n+ {obs['what_works'].strip()}")
+    if obs.get("what_fails"):
+        lines.append(f"- {obs['what_fails'].strip()}")
+    return "\n".join(lines)
+
+
+def step4_diary(ctx: Ctx, observation: dict, measured_sim: float | None) -> dict:
+    """Returns the validated diary entry (iteration-json shape).
+
+    `observation` is the structured step-3 payload.
+    `measured_sim` is the harness-computed similarity to the previous render
+    (None on the very first iteration). We surface it as a hard number so
+    the model's `repetition_check` field is grounded, not optimistic.
+    """
     log.info("step 4/6 — diary entry")
 
     cur = ctx.state.current_series()
     cur_len = cur.length() if cur else 0
 
+    obs_block = _format_observation_for_diary(observation)
+
+    sim_block = ""
+    if measured_sim is not None:
+        sim_block = (
+            f"\n\n## Измеренная визуальная схожесть с предыдущей работой\n\n"
+            f"sim = {measured_sim:.2f} → bucket = "
+            f"{similarity_bucket(measured_sim)}. "
+            "Поле `repetition_check` в ответе обязано согласовываться с этим "
+            "значением (отклонение на одну ступень — предел; иначе это "
+            "самообман). В `repetition_note` назови ОДНУ конкретную ось, "
+            "которая будет смещена в следующей итерации, если здесь "
+            "mild/strong repeat."
+        )
+
+    # contract hint for the proposed_next_series at close-time
+    past_series_block = ""
+    closed = [s for s in ctx.state.series if not s.is_open()]
+    if closed:
+        past_series_block = (
+            "\n\nПри close — в proposed_next_series поля "
+            "must_differ_from_previous_in (минимум 2 оси) и "
+            "forbidden_features (конкретные признаки, которые НЕ должны "
+            "повториться в новой серии) должны быть содержательны и "
+            "опираться на то, что уже было в прошлых сериях: "
+            + "; ".join(f"#{s.id} «{s.name}»" for s in closed[-4:])
+        )
+
     user = (
         f"{_full_memory(ctx.state, ctx.path_obj)}\n\n"
-        f"## Наблюдение (итерация {ctx.n:03d})\n\n{observation}\n\n"
-        f"## Задача — Шаг 4\n\n"
-        f"Верни JSON по схеме DiaryEntry. Поле `series_status`:\n"
-        f"- 'continue' — работа продолжает текущую серию;\n"
+        f"## Наблюдение (итерация {ctx.n:03d}) — структурированно\n\n"
+        f"{obs_block}"
+        f"{sim_block}\n\n"
+        "## Задача — Шаг 4\n\n"
+        "Верни JSON по схеме DiaryEntry. Поле `series_status`:\n"
+        "- 'continue' — работа продолжает текущую серию;\n"
         f"- 'close' — серия завершается этой работой. Разрешено только если "
         f"в серии уже ≥{MIN_SERIES_LEN} работ.\n"
-        f"При `close` обязательны содержательные `closed_reason` "
-        f"и `proposed_next_series`. Если текущей серии ещё нет "
-        f"(начало или принудительное закрытие предыдущей), `series_status` "
-        f"всё равно ставь 'continue' — харнесс сам откроет новую серию "
-        f"по твоему `proposed_next_series`, так что лучше заполни его и тут."
+        "При `close` обязательны содержательные `closed_reason` и "
+        "`proposed_next_series` (со всеми полями, включая "
+        "must_differ_from_previous_in и forbidden_features). Если текущей "
+        "серии ещё нет (начало или принудительное закрытие предыдущей), "
+        "`series_status` всё равно ставь 'continue' — харнесс сам откроет "
+        "новую серию по твоему `proposed_next_series`, так что лучше "
+        "заполни его и тут."
+        f"{past_series_block}"
     )
 
     obj = llm_json(
         user,
         SCHEMA_STEP4,
         temperature=0.85,
-        max_tokens=2000,
+        max_tokens=2500,
         tag=f"step4_iter{ctx.n:03d}",
     )
 
     # sanity: non-empty fields
-    required = ("title", "what_i_see", "what_resonates", "what_is_silent", "where_next")
+    required = (
+        "title",
+        "what_i_see",
+        "what_resonates",
+        "what_is_silent",
+        "where_next",
+        "repetition_check",
+        "repetition_note",
+    )
     for k in required:
-        if not obj.get(k) or len(obj[k].strip()) < 10:
+        if not obj.get(k) or len(obj[k].strip()) < 5:
             raise RuntimeError(
                 f"diary field {k!r} is empty or too short: {obj.get(k)!r}"
+            )
+
+    # if harness measured strong repeat but the model reports novel, log a
+    # warning (don't overwrite — the model sometimes has legit reasons, e.g.
+    # intentional quote of a prior work). This shows up in run.log so you
+    # can audit after the fact.
+    if measured_sim is not None:
+        bucket = similarity_bucket(measured_sim)
+        if bucket == "strong_repeat" and obj["repetition_check"] == "novel":
+            log.warning(
+                "    model claims 'novel' but measured sim=%.2f is "
+                "strong_repeat; leaving model's self-report but flagging.",
+                measured_sim,
             )
 
     # enforce series policy
@@ -1023,7 +1699,7 @@ def step4_diary(ctx: Ctx, observation: str) -> dict:
         obj["series_status"] = "continue"
         obj["closed_reason"] = None
 
-    if status == "close":
+    if obj["series_status"] == "close":
         if not obj.get("closed_reason"):
             obj["closed_reason"] = (
                 obj.get("where_next") or "Серия исчерпала свой голос."
@@ -1071,6 +1747,10 @@ def step4b_series_retrospective(
         return None
 
     # build the message: one text header + inline image/caption pairs
+    past_closers = _pick_past_series_closers(state, k=10)
+    # drop the just-closed series itself, if it sneaks in
+    past_closers = [(s, p) for s, p in past_closers if s.id != series.id]
+
     header = (
         f"{_full_memory(state, path_obj)}\n\n"
         f"## Задача — Шаг 4b (Ретроспектива серии)\n\n"
@@ -1081,11 +1761,18 @@ def step4b_series_retrospective(
         f"Ниже — все {len(entries)} работ серии по порядку, "
         f"в уменьшенном виде (512px). Перед каждым изображением — "
         f"твоя же дневниковая запись о нём.\n\n"
-        f"Посмотри на серию как на единое произведение. "
-        f"Верни JSON SeriesRetrospective — поэтическое имя всей серии "
-        f"(может совпадать с «{series.name}» или уточнять его), "
-        f"3–5 предложений об арке, что проявилось, что разочаровало, "
-        f"короткий вердикт, и мост к следующей серии."
+        + (
+            "После работ этой серии ты увидишь финальные кадры прошедших "
+            "серий — чтобы судить эту серию не как изолированное "
+            "произведение, а в контексте всего пути.\n\n"
+            if past_closers
+            else ""
+        )
+        + "Посмотри на серию как на единое произведение (и как на часть "
+        "общего пути). Верни JSON SeriesRetrospective — поэтическое имя "
+        f"всей серии (может совпадать с «{series.name}» или уточнять его), "
+        "3–5 предложений об арке, что проявилось, что разочаровало, "
+        "короткий вердикт, и мост к следующей серии."
     )
 
     content: list[dict] = [{"type": "text", "text": header}]
@@ -1103,6 +1790,33 @@ def step4b_series_retrospective(
                 "image_url": {"url": encode_image_downscaled(png, size=512)},
             }
         )
+
+    # past-series closing frames, captioned briefly
+    if past_closers:
+        content.append(
+            {
+                "type": "text",
+                "text": (
+                    "— — —\n"
+                    "Финальные кадры предыдущих серий "
+                    "(для контекста и моста к следующей):"
+                ),
+            }
+        )
+        for s, p in past_closers:
+            retro_title = (s.retrospective or {}).get("title") or s.name
+            content.append(
+                {
+                    "type": "text",
+                    "text": f"Серия #{s.id} «{s.name}» → «{retro_title}»",
+                }
+            )
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": encode_image_downscaled(p, size=384)},
+                }
+            )
 
     try:
         obj = llm_json(
@@ -1137,24 +1851,36 @@ def step4b_series_retrospective(
     return obj
 
 
-def step5_path(ctx: Ctx, observation: str, force: bool = False) -> dict | None:
-    """Returns path_obj if rewritten, else None."""
+def step5_path(ctx: Ctx, force: bool = False) -> dict | None:
+    """Returns path_obj if rewritten, else None.
+
+    By default path.json is only rewritten (a) the very first time, and
+    (b) on a series boundary (caller passes force=True). Setting
+    PATH_REWRITE_EVERY>0 in env re-enables periodic rewrites for debugging.
+    The old per-6-iteration rewrite turned into an echo chamber where the
+    model only ever tightened the current tendency.
+    """
     first_time = ctx.path_obj is None
-    due = force or ctx.n == 1 or ctx.n % PATH_REWRITE_EVERY == 0
-    if not (first_time or due):
-        log.info("step 5/6 — path (skipped)")
+    periodic = PATH_REWRITE_EVERY > 0 and ctx.n > 1 and ctx.n % PATH_REWRITE_EVERY == 0
+    if not (first_time or force or periodic):
+        log.info("step 5/6 — path (skipped; only rewriting on boundary)")
         return None
 
-    log.info("step 5/6 — rewrite artistic_path")
+    log.info(
+        "step 5/6 — rewrite artistic_path (reason=%s)",
+        "first" if first_time else ("boundary" if force else "periodic"),
+    )
     is_first = ctx.n == 1 and first_time
     user = f"{_full_memory(ctx.state, ctx.path_obj)}\n\n## Задача — Шаг 5\n\n" + (
-        f"Это итерация 001. Верни JSON ArtisticPath: поле `opening` "
-        f"заполни одной-двумя фразами, остальные поля заполни "
-        f"лаконичными набросками."
+        "Это итерация 001. Верни JSON ArtisticPath: поле `opening` "
+        "заполни одной-двумя фразами, остальные поля заполни "
+        "лаконичными набросками."
         if is_first
         else "Перепиши artistic_path целиком. Верни JSON ArtisticPath. "
         "Поле `opening` ставь null. Остальные семь полей — плотный срез "
-        "(150–300 слов суммарно)."
+        "(150–300 слов суммарно). Не бойся противоречить прошлому "
+        "варианту: если выяснилось, что то, что тебя привлекало, на деле "
+        "не работает — так и напиши."
     )
 
     budget = 1000 if is_first else 3500
@@ -1184,6 +1910,17 @@ def render_diary(state: State) -> str:
             header += "  *(закрыта)*"
         parts.append(header)
         parts.append(f"*{s.thesis}*\n")
+        if s.must_differ_from_previous_in or s.forbidden_features:
+            if s.must_differ_from_previous_in:
+                parts.append(
+                    "*Обязана отличаться по:* "
+                    + ", ".join(s.must_differ_from_previous_in)
+                )
+            if s.forbidden_features:
+                parts.append(
+                    "*Запрещено в этой серии:* " + "; ".join(s.forbidden_features)
+                )
+            parts.append("")
         for n in s.iterations:
             it = state.iterations.get(n)
             if it is None:
@@ -1193,6 +1930,12 @@ def render_diary(state: State) -> str:
             parts.append(f"- **Что звучит.** {it['what_resonates']}")
             parts.append(f"- **Что молчит.** {it['what_is_silent']}")
             parts.append(f"- **Куда дальше.** {it['where_next']}")
+            rep = it.get("repetition_check")
+            if rep:
+                rep_note = it.get("repetition_note") or ""
+                sim = it.get("measured_similarity_to_previous")
+                sim_str = f"{sim:.2f}" if isinstance(sim, (int, float)) else "—"
+                parts.append(f"- **Повтор.** {rep} (sim={sim_str}) — {rep_note}")
             parts.append("")
             parts.append("---")
             parts.append("")
@@ -1259,28 +2002,74 @@ def _ensure_open_series(
     if cur is not None:
         return cur
     if proposal and proposal.get("name") and proposal.get("thesis"):
-        return state.open_series(proposal["name"], proposal["thesis"], at_iter)
+        return state.open_series(
+            proposal["name"],
+            proposal["thesis"],
+            at_iter,
+            must_differ_from_previous_in=proposal.get("must_differ_from_previous_in"),
+            forbidden_features=proposal.get("forbidden_features"),
+        )
     # no proposal — ask the model in a tiny targeted call
     log.warning("    no open series and no proposal; asking model to name one")
     user = (
         f"{_full_memory(state, load_path_json())}\n\n"
         "## Задача\n\nТекущей открытой серии нет, а харнессу она нужна. "
         "Предложи имя и тезис новой серии, которая осмысленно следует из "
-        "прошлого пути. Верни JSON с полями `name` и `thesis`."
+        "прошлого пути. Также укажи:\n"
+        "- must_differ_from_previous_in: массив ≥2 осей из "
+        "[palette, composition, shape_family, density, symmetry, "
+        "algorithmic_kernel, scale, texture], по которым эта серия "
+        "обязана заметно отличаться от прошлых;\n"
+        "- forbidden_features: список конкретных признаков, которые НЕ "
+        "должны появляться в этой серии.\n"
+        "Верни JSON с полями `name`, `thesis`, `must_differ_from_previous_in`, "
+        "`forbidden_features`."
     )
     schema = {
         "name": "NewSeries",
         "strict": True,
-        "schema": _obj({"name": {"type": "string"}, "thesis": {"type": "string"}}),
+        "schema": _obj(
+            {
+                "name": {"type": "string"},
+                "thesis": {"type": "string"},
+                "must_differ_from_previous_in": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "palette",
+                            "composition",
+                            "shape_family",
+                            "density",
+                            "symmetry",
+                            "algorithmic_kernel",
+                            "scale",
+                            "texture",
+                        ],
+                    },
+                    "minItems": 2,
+                },
+                "forbidden_features": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            }
+        ),
     }
     obj = llm_json(
         user,
         schema,
         temperature=0.7,
-        max_tokens=600,
+        max_tokens=800,
         tag=f"open_series_iter{at_iter:03d}",
     )
-    return state.open_series(obj["name"], obj["thesis"], at_iter)
+    return state.open_series(
+        obj["name"],
+        obj["thesis"],
+        at_iter,
+        must_differ_from_previous_in=obj.get("must_differ_from_previous_in"),
+        forbidden_features=obj.get("forbidden_features"),
+    )
 
 
 def one_cycle(state: State) -> None:
@@ -1298,8 +2087,30 @@ def one_cycle(state: State) -> None:
 
     step1_create(ctx)
     png = step2_render(ctx)
+
+    # harness-side perceptual fingerprint: we need it for step3/step4 to
+    # ground the similarity judgment in numbers, and we persist it on the
+    # iter_json so future iterations can reuse it without re-reading PNGs.
+    fingerprint = compute_fingerprint(png)
+
+    # similarity to the immediately previous render (for step-4 grounding)
+    measured_sim: float | None = None
+    prev_fp: dict | None = None
+    if state.iterations:
+        prev_n = max(state.iterations)
+        prev_it = state.iterations.get(prev_n)
+        prev_fp = prev_it.get("fingerprint") if prev_it else None
+        if prev_fp is not None:
+            measured_sim = similarity(fingerprint, prev_fp)
+            log.info(
+                "    visual similarity to %03d: %.2f (%s)",
+                prev_n,
+                measured_sim,
+                similarity_bucket(measured_sim),
+            )
+
     observation = step3_observe(ctx, png)
-    diary = step4_diary(ctx, observation)
+    diary = step4_diary(ctx, observation, measured_sim)
 
     # record this iteration against the current series
     cur = state.current_series()
@@ -1313,10 +2124,16 @@ def one_cycle(state: State) -> None:
         "what_resonates": diary["what_resonates"],
         "what_is_silent": diary["what_is_silent"],
         "where_next": diary["where_next"],
+        "repetition_check": diary.get("repetition_check"),
+        "repetition_note": diary.get("repetition_note"),
         "series_status": diary["series_status"],
         "closed_reason": diary.get("closed_reason"),
         "proposed_next_series": diary.get("proposed_next_series"),
+        "observation": observation,
+        "measured_similarity_to_previous": measured_sim,
+        "fingerprint": fingerprint,
         "image_path": png.name,
+        "script_path": f"scripts/art_{n:03d}.py",
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     state.save_iteration(iter_json)
@@ -1352,7 +2169,7 @@ def one_cycle(state: State) -> None:
         _ensure_open_series(state, at_iter=n + 1, proposal=proposal)
 
     # step 5 — rewrite path. Force-rewrite on series boundary.
-    new_path = step5_path(ctx, observation, force=closed_this_cycle)
+    new_path = step5_path(ctx, force=closed_this_cycle)
     if new_path is not None:
         path_obj = new_path
 

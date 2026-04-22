@@ -15,10 +15,27 @@
 
 const POLL_MS = 4000;
 const IMG_BASE = "/output/";
+const FOLDERS_POLL_MS = 30000;   // re-scan available folders periodically
+const FOLDER_STORAGE_KEY = "imggen.folder";
 
 const el = (id) => document.getElementById(id);
 const pad3 = (n) => String(n).padStart(3, "0");
-const imgUrl = (n) => `${IMG_BASE}art_${pad3(n)}.png`;
+
+/** Currently-selected folder name (server-side directory name). `null` means
+ *  use the server's default — we don't pass a ?folder= argument. */
+let CURRENT_FOLDER = null;
+try {
+  const saved = localStorage.getItem(FOLDER_STORAGE_KEY);
+  if (saved) CURRENT_FOLDER = saved;
+} catch (_) { /* private mode etc. */ }
+
+function folderQuery(prefix = "?") {
+  if (!CURRENT_FOLDER) return "";
+  return prefix + "folder=" + encodeURIComponent(CURRENT_FOLDER);
+}
+
+const imgUrl = (n) =>
+  `${IMG_BASE}art_${pad3(n)}.png${folderQuery("?")}`;
 
 // ---------------------------------------------------------------------- *
 // cached state
@@ -93,7 +110,7 @@ async function renderHero(current) {
           `Серия ${current.series_id} · ${current.series_name || ""}`.trim());
   setText(el("hero-iter"), `итерация ${pad3(current.iteration)}`);
 
-  const src = IMG_BASE + (current.image_path || `art_${pad3(current.iteration)}.png`);
+  const src = IMG_BASE + (current.image_path || `art_${pad3(current.iteration)}.png`) + folderQuery("?");
   const img = el("hero-img");
   if (img.getAttribute("src") !== src) {
     const loaded = await preloadImage(src);
@@ -375,7 +392,7 @@ async function renderViewerWork() {
   setText(el("v-next-text"), it.where_next      || "—");
 
   // Image (preload + fade)
-  const src = IMG_BASE + (it.image_path || `art_${pad3(it.iteration)}.png`);
+  const src = IMG_BASE + (it.image_path || `art_${pad3(it.iteration)}.png`) + folderQuery("?");
   const img = el("v-img");
   if (img.getAttribute("src") !== src) {
     img.style.opacity = "0";
@@ -596,12 +613,124 @@ function wireViewer() {
 }
 
 // ---------------------------------------------------------------------- *
+// Folder picker
+// ---------------------------------------------------------------------- */
+
+/** Cache of the last folder list rendered, so we don't rebuild <option>s
+ *  on every poll. */
+let lastFoldersSig = null;
+
+function foldersSignature(list, selected) {
+  return JSON.stringify({
+    s: selected || "",
+    f: (list || []).map((f) => [f.name, f.is_default, f.iterations]),
+  });
+}
+
+function formatFolderOption(f) {
+  const suffix = f.iterations
+    ? ` · ${f.iterations} ${plural(f.iterations, "работа", "работы", "работ")}`
+    : "";
+  const def = f.is_default ? " ★" : "";
+  return `${f.name}${def}${suffix}`;
+}
+
+async function refreshFolders() {
+  let data;
+  try {
+    data = await fetchFolders();
+  } catch (e) {
+    return;  // silent — next poll will retry
+  }
+  const folders = data.folders || [];
+  const select = el("folder-select");
+  if (!select) return;
+
+  // If the persisted CURRENT_FOLDER no longer exists on disk, fall back to
+  // the server's default (null == send no folder param).
+  if (CURRENT_FOLDER && !folders.some((f) => f.name === CURRENT_FOLDER)) {
+    CURRENT_FOLDER = null;
+    try { localStorage.removeItem(FOLDER_STORAGE_KEY); } catch (_) {}
+  }
+
+  const effective = CURRENT_FOLDER || (data.default || "");
+  const sig = foldersSignature(folders, effective);
+  if (sig === lastFoldersSig) return;
+  lastFoldersSig = sig;
+
+  // Rebuild options (preserve ordering from server — newest first).
+  select.innerHTML = "";
+  if (folders.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "нет данных";
+    select.appendChild(opt);
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  for (const f of folders) {
+    const opt = document.createElement("option");
+    opt.value = f.name;
+    opt.textContent = formatFolderOption(f);
+    if (f.name === effective) opt.selected = true;
+    select.appendChild(opt);
+  }
+}
+
+function resetLocalState() {
+  STATE = null;
+  ITERS_BY_NUM = new Map();
+  SERIES_BY_ID = new Map();
+  lastSig.current = null;
+  lastSig.seriesSig = null;
+  lastSig.pathSig = null;
+
+  // Clear rendered views so the user sees an immediate transition.
+  const img = el("hero-img");
+  if (img) { img.removeAttribute("src"); img.style.opacity = "0"; }
+  setText(el("hero-title"), "Загружаем…");
+  setText(el("hero-series"), "—");
+  setText(el("hero-iter"), "—");
+  for (const id of ["t-see", "t-resonates", "t-silent", "t-next"]) {
+    setText(el(id), "—");
+  }
+  el("series-list").innerHTML = '<p class="muted">загружаем…</p>';
+  el("path-body").innerHTML   = '<p class="muted">загружаем…</p>';
+
+  // Close the fullscreen viewer if it's open — its contents now reference
+  // the previous folder.
+  if (viewer.open) closeViewer();
+}
+
+function wireFolderPicker() {
+  const select = el("folder-select");
+  if (!select) return;
+  select.addEventListener("change", async () => {
+    const val = select.value || "";
+    CURRENT_FOLDER = val || null;
+    try {
+      if (CURRENT_FOLDER) localStorage.setItem(FOLDER_STORAGE_KEY, CURRENT_FOLDER);
+      else                localStorage.removeItem(FOLDER_STORAGE_KEY);
+    } catch (_) { /* ignore */ }
+    resetLocalState();
+    await tick();          // fetch immediately, don't wait for next poll
+  });
+}
+
+// ---------------------------------------------------------------------- *
 // Poll loop
 // ---------------------------------------------------------------------- */
 
 async function fetchState() {
-  const res = await fetch("/api/state", { cache: "no-store" });
+  const res = await fetch("/api/state" + folderQuery("?"), { cache: "no-store" });
   if (!res.ok) throw new Error("state fetch failed: " + res.status);
+  return res.json();
+}
+
+async function fetchFolders() {
+  const res = await fetch("/api/folders", { cache: "no-store" });
+  if (!res.ok) throw new Error("folders fetch failed: " + res.status);
   return res.json();
 }
 
@@ -682,4 +811,7 @@ async function loop() {
 }
 
 wireViewer();
+wireFolderPicker();
+refreshFolders();                                // initial folder list
+setInterval(refreshFolders, FOLDERS_POLL_MS);    // keep it fresh
 loop();

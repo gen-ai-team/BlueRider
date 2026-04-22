@@ -9,12 +9,13 @@
 """
 Exhibition web interface for the autonomous-art driver.
 
-Reads the same OUTPUT_DIR that run.py writes to and serves:
+Reads OUTPUT_DIR (same one run.py writes to) and serves:
 
-  GET  /                      -> the exhibition page
-  GET  /api/state             -> full snapshot (series + iterations + path + status)
-  GET  /output/art_NNN.png    -> rendered images
-  GET  /static/*              -> frontend assets
+  GET  /                        -> the exhibition page
+  GET  /api/folders             -> available output folders (siblings of default)
+  GET  /api/state?folder=NAME   -> full snapshot for the chosen folder
+  GET  /output/art_NNN.png      -> rendered images (also accepts ?folder=NAME)
+  GET  /static/*                -> frontend assets
 
 Run:
   uv run web.py                          # 0.0.0.0:8765
@@ -22,7 +23,9 @@ Run:
   uv run web.py --output /path/to/output
 
 The page auto-refreshes its data every few seconds, so it picks up new
-iterations as run.py writes them.
+iterations as run.py writes them. Users can also switch between any
+sibling folder of the default OUTPUT_DIR that looks like a run
+(i.e. contains state/series.json).
 """
 
 from __future__ import annotations
@@ -36,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -46,15 +49,26 @@ REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT = Path(os.getenv("OUTPUT_DIR", REPO_ROOT / "output")).resolve()
 STATIC_DIR = REPO_ROOT / "web"
 
+# Only allow folders whose names match this pattern (no traversal, no hidden
+# dirs). This is intentionally lax — we require a valid state/series.json
+# inside the folder anyway before it shows up as a selectable option.
+_FOLDER_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
+
 
 def _parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Exhibition viewer for image_gen.")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--output", type=Path, default=DEFAULT_OUTPUT,
-                    help="Path to the run.py OUTPUT_DIR (default: ./output).")
-    ap.add_argument("--reload", action="store_true",
-                    help="Enable uvicorn auto-reload (dev).")
+    ap.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT,
+        help="Path to the run.py OUTPUT_DIR (default: ./output). "
+        "Its parent directory is scanned for switchable runs.",
+    )
+    ap.add_argument(
+        "--reload", action="store_true", help="Enable uvicorn auto-reload (dev)."
+    )
     return ap.parse_args()
 
 
@@ -84,19 +98,126 @@ def _tail_log(path: Path, n: int = 12) -> list[str]:
     return list(deque(lines, maxlen=n))
 
 
-def build_app(output_dir: Path) -> FastAPI:
+def _is_run_dir(path: Path) -> bool:
+    """A folder counts as a run folder if it contains state/series.json."""
+    try:
+        return (path / "state" / "series.json").is_file()
+    except OSError:
+        return False
+
+
+def _discover_folders(default: Path) -> list[Path]:
+    """Return all sibling directories of `default` that look like run folders,
+    plus `default` itself if it qualifies. Sorted by most-recently-modified.
+    """
+    base = default.parent
+    found: dict[Path, float] = {}
+
+    if _is_run_dir(default):
+        try:
+            found[default] = default.stat().st_mtime
+        except OSError:
+            found[default] = 0.0
+
+    try:
+        entries = list(base.iterdir())
+    except OSError:
+        entries = []
+
+    for p in entries:
+        if not p.is_dir():
+            continue
+        if not _FOLDER_NAME_RE.fullmatch(p.name):
+            continue
+        if not _is_run_dir(p):
+            continue
+        try:
+            found[p.resolve()] = p.stat().st_mtime
+        except OSError:
+            found.setdefault(p.resolve(), 0.0)
+
+    # Sort newest first; keep default at top when it qualifies.
+    items = sorted(found.items(), key=lambda kv: kv[1], reverse=True)
+    return [p for p, _ in items]
+
+
+def build_app(default_output: Path) -> FastAPI:
     app = FastAPI(title="image_gen exhibition", docs_url=None, redoc_url=None)
 
-    state_dir = output_dir / "state"
-    series_json = state_dir / "series.json"
-    path_json = state_dir / "path.json"
-    iter_dir = state_dir / "iterations"
-    log_path = output_dir / "run.log"
+    base_dir = default_output.parent
+
+    def _resolve_folder(folder: str | None) -> Path:
+        """Resolve a ?folder=NAME query parameter to a safe absolute path.
+
+        - Empty / missing -> use default_output.
+        - Otherwise must be a single path component (no slashes, no '..'),
+          must match the name whitelist, must live directly under base_dir,
+          and must look like a run folder.
+        """
+        if not folder:
+            return default_output
+        if "/" in folder or "\\" in folder or folder in ("", ".", ".."):
+            raise HTTPException(400, "bad folder")
+        if not _FOLDER_NAME_RE.fullmatch(folder):
+            raise HTTPException(400, "bad folder")
+        candidate = (base_dir / folder).resolve()
+        try:
+            candidate.relative_to(base_dir.resolve())
+        except ValueError:
+            raise HTTPException(400, "folder escapes base dir")
+        if not candidate.is_dir() or not _is_run_dir(candidate):
+            raise HTTPException(404, f"folder not found: {folder}")
+        return candidate
+
+    @app.get("/api/folders")
+    def api_folders() -> JSONResponse:
+        folders = _discover_folders(default_output)
+        items = []
+        default_resolved = default_output.resolve()
+        for p in folders:
+            series_path = p / "state" / "series.json"
+            iter_dir = p / "state" / "iterations"
+            try:
+                iter_count = (
+                    sum(1 for q in iter_dir.glob("iter_*.json"))
+                    if iter_dir.exists()
+                    else 0
+                )
+            except OSError:
+                iter_count = 0
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            items.append(
+                {
+                    "name": p.name,
+                    "path": str(p),
+                    "is_default": p == default_resolved,
+                    "iterations": iter_count,
+                    "mtime": mtime,
+                    "has_series": series_path.is_file(),
+                }
+            )
+        return JSONResponse(
+            {
+                "base_dir": str(base_dir),
+                "default": default_output.name,
+                "folders": items,
+            }
+        )
 
     @app.get("/api/state")
-    def api_state() -> JSONResponse:
+    def api_state(folder: str | None = Query(None)) -> JSONResponse:
+        output_dir = _resolve_folder(folder)
         if not output_dir.exists():
             raise HTTPException(500, f"OUTPUT_DIR not found: {output_dir}")
+
+        state_dir = output_dir / "state"
+        series_json = state_dir / "series.json"
+        path_json = state_dir / "path.json"
+        iter_dir = state_dir / "iterations"
+        log_path = output_dir / "run.log"
 
         series_blob = _read_json(series_json) or {"series": []}
         path_obj = _read_json(path_json)
@@ -126,27 +247,31 @@ def build_app(output_dir: Path) -> FastAPI:
 
         tail = _tail_log(log_path, n=14)
 
-        return JSONResponse({
-            "output_dir": str(output_dir),
-            "current": current,
-            "iterations": ordered,          # newest -> oldest
-            "series": series_sorted,        # open first, then newest-closed
-            "path": path_obj,
-            "log_tail": tail,
-            "counts": {
-                "iterations": len(iterations),
-                "series": len(all_series),
-                "open_series": len(open_series),
-            },
-        })
+        return JSONResponse(
+            {
+                "folder": output_dir.name,
+                "output_dir": str(output_dir),
+                "current": current,
+                "iterations": ordered,  # newest -> oldest
+                "series": series_sorted,  # open first, then newest-closed
+                "path": path_obj,
+                "log_tail": tail,
+                "counts": {
+                    "iterations": len(iterations),
+                    "series": len(all_series),
+                    "open_series": len(open_series),
+                },
+            }
+        )
 
     @app.get("/output/{name}")
-    def output_file(name: str):
-        # Only allow images directly under OUTPUT_DIR, no traversal.
+    def output_file(name: str, folder: str | None = Query(None)):
+        # Only allow images directly under the resolved folder, no traversal.
         if "/" in name or "\\" in name or ".." in name:
             raise HTTPException(400, "bad name")
         if not re.fullmatch(r"[A-Za-z0-9_.\-]+\.(png|jpe?g|webp)", name):
             raise HTTPException(404, "not an image")
+        output_dir = _resolve_folder(folder)
         fp = output_dir / name
         if not fp.is_file():
             raise HTTPException(404, "not found")
@@ -174,11 +299,13 @@ def main() -> None:
 
     if args.reload:
         # reload mode needs an import string
-        uvicorn.run("web:app_factory", host=args.host, port=args.port,
-                    reload=True, factory=True)
+        uvicorn.run(
+            "web:app_factory", host=args.host, port=args.port, reload=True, factory=True
+        )
     else:
         app = build_app(output_dir)
         print(f"serving {output_dir} on http://{args.host}:{args.port}")
+        print(f"switchable folders scanned from: {output_dir.parent}")
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 

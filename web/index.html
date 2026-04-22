@@ -38,7 +38,17 @@
               </div>
               <span id="status-line">—</span>
             </div>
-            <div class="status-stats" id="status-stats">—</div>
+            <div class="status-side">
+              <label class="folder-picker" for="folder-select"
+                     title="Откуда брать данные">
+                <span class="folder-picker-label">Папка</span>
+                <select id="folder-select" class="folder-select"
+                        aria-label="Папка с данными">
+                  <option value="">—</option>
+                </select>
+              </label>
+              <div class="status-stats" id="status-stats">—</div>
+            </div>
           </div>
           <div class="status-progress" aria-hidden="true">
             <div class="status-progress-bar" id="status-progress-bar"></div>

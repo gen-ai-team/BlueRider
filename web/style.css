@@ -337,6 +337,67 @@ html, body {
   white-space: nowrap;
   align-self: center;
 }
+.status-side {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--gap) * 0.6);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.folder-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 6px 12px;
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: var(--fs-small);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+}
+.folder-picker:hover,
+.folder-picker:focus-within {
+  border-color: var(--accent-dim);
+  color: var(--text);
+}
+.folder-picker-label {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+}
+.folder-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  padding: 2px 22px 2px 4px;
+  margin: 0;
+  cursor: pointer;
+  max-width: clamp(120px, 18vw, 280px);
+  text-overflow: ellipsis;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--text-muted) 50%),
+    linear-gradient(135deg, var(--text-muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 12px) 50%,
+    calc(100% - 7px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+.folder-select:focus {
+  outline: none;
+}
+.folder-select option {
+  background: var(--bg-elev);
+  color: var(--text);
+}
 .status-progress {
   position: relative;
   width: 100%;
@@ -589,6 +650,9 @@ html, body {
   .series-list { max-height: 80vh; }
   .status-head {
     grid-template-columns: 1fr;
+  }
+  .status-side {
+    justify-content: flex-start;
   }
   .status-stats {
     align-self: flex-start;
