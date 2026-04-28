@@ -73,9 +73,7 @@ DEBUG_DIR = OUTPUT_DIR / "debug"
 STATE_DIR = OUTPUT_DIR / "state"
 SERIES_JSON = STATE_DIR / "series.json"
 PATH_JSON = STATE_DIR / "path.json"
-LIBRARY_JSON = STATE_DIR / "library.json"
 ITER_DIR = STATE_DIR / "iterations"
-LIBRARY_MD = OUTPUT_DIR / "library.md"
 
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 VISION_MODEL = os.getenv("VISION_MODEL", MODEL)
@@ -88,9 +86,8 @@ MIN_SERIES_LEN = int(os.getenv("MIN_SERIES_LEN", "7"))
 SOFT_MAX_SERIES_LEN = int(os.getenv("SOFT_MAX_SERIES_LEN", "12"))
 HARD_MAX_SERIES_LEN = int(os.getenv("HARD_MAX_SERIES_LEN", "15"))
 # Expected total number of series for the whole run. Drives the
-# explore/exploit framing the model sees — early on it should build its
-# library, later on it should lean on it to create a recognizable body of
-# work. 0 disables progress framing (infinite / unknown run).
+# explore/exploit framing the model sees. 0 disables progress framing
+# (infinite / unknown run).
 EXPECTED_SERIES = int(os.getenv("EXPECTED_SERIES", "12"))
 
 # Rendered image resolution. Injected into the prompt so the LLM doesn't
@@ -533,121 +530,6 @@ SCHEMA_RETRO = {
             "what_disappointed": {"type": "string"},
             "verdict": {"type": "string"},
             "bridge_to_next": {"type": "string"},
-            # Library curation happens in two steps: first the model commits
-            # to a verb ("nothing" / "add" / "retire" / "add_and_retire"),
-            # then it fills only the slots that verb allows. The enum is
-            # there so that "do not touch the library" becomes a first-class
-            # choice the model has to type out — not a quiet empty array.
-            "library_decision": {
-                "type": "string",
-                "enum": ["nothing", "add", "retire", "add_and_retire"],
-                "description": (
-                    "Что ты собираешься сделать с библиотекой. По умолчанию "
-                    "— 'nothing': большинство серий ничего не добавляют и "
-                    "ничего не списывают, и это нормально. 'add' — только "
-                    "если в этой серии появился действительно отдельный "
-                    "приём, к которому ты захочешь вернуться; 'retire' — "
-                    "если какая-то старая запись перестала звучать твоей; "
-                    "'add_and_retire' — редкий случай замены одной записи "
-                    "на более точную."
-                ),
-            },
-            "nothing_reason": {
-                "type": ["string", "null"],
-                "description": (
-                    "Если library_decision='nothing' — одно предложение, "
-                    "почему ты решил ничего не трогать (например: «в этой "
-                    "серии я просто развивал уже записанный приём», «я ещё "
-                    "не уверен, удержится ли этот жест»). Иначе null."
-                ),
-            },
-            "library_additions": {
-                "type": "array",
-                "items": _obj(
-                    {
-                        "name": {
-                            "type": "string",
-                            "description": (
-                                "Короткое имя техники/приёма (3–7 слов). "
-                                "Не начинай подряд все записи с 'Метод …' / "
-                                "'Алгоритм …' — если в библиотеке уже есть "
-                                "такие, выбери другую форму имени."
-                            ),
-                        },
-                        "when_to_use": {
-                            "type": "string",
-                            "description": "Одно-два предложения: в каком "
-                            "художественном контексте этот приём стоит "
-                            "доставать.",
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Свободное описание техники — "
-                            "что она делает, чем отличается, как её "
-                            "настраивать. Русский язык.",
-                        },
-                        "code_snippet": {
-                            "type": ["string", "null"],
-                            "description": (
-                                "Либо null (если приём словесный и код "
-                                "ничего не добавит), либо полноценный "
-                                "рабочий фрагмент Python. Тело функции "
-                                "должно делать то, что описывает имя — "
-                                "никаких заглушек вроде `pass`, "
-                                "`# simplified logic`, `# conceptual "
-                                "snippet`, `...`: если ты не готов "
-                                "написать реализацию, ставь null. Минимум "
-                                "~200 символов осмысленного кода. Код "
-                                "пишется под окружение art.py (numpy, "
-                                "PIL/Pillow, scipy, noise + stdlib)."
-                            ),
-                        },
-                    },
-                    required=[
-                        "name",
-                        "when_to_use",
-                        "description",
-                        "code_snippet",
-                    ],
-                ),
-                "description": (
-                    "Заполняй только если library_decision='add' или "
-                    "'add_and_retire'. В остальных случаях — пустой массив. "
-                    "Обычно ноль записей; если add — одна запись, очень "
-                    "редко две. Если уже есть похожая запись — лучше "
-                    "списать её через retire с superseded_by, чем плодить "
-                    "дубликат."
-                ),
-            },
-            "library_retirements": {
-                "type": "array",
-                "items": _obj(
-                    {
-                        "entry_id": {
-                            "type": "integer",
-                            "description": "id записи из библиотеки, "
-                            "которую ты списываешь.",
-                        },
-                        "reason": {
-                            "type": "string",
-                            "description": "Одно предложение: почему этот "
-                            "приём больше не твой.",
-                        },
-                        "superseded_by": {
-                            "type": ["integer", "null"],
-                            "description": "Если списание — это замена на "
-                            "более точную запись из library_additions той "
-                            "же ретроспективы — поставь 0 (харнесс "
-                            "подставит реальный id) или null.",
-                        },
-                    },
-                    required=["entry_id", "reason", "superseded_by"],
-                ),
-                "description": (
-                    "Заполняй только если library_decision='retire' или "
-                    "'add_and_retire'. В остальных случаях — пустой массив."
-                ),
-            },
         },
         required=[
             "title",
@@ -656,10 +538,6 @@ SCHEMA_RETRO = {
             "what_disappointed",
             "verdict",
             "bridge_to_next",
-            "library_decision",
-            "nothing_reason",
-            "library_additions",
-            "library_retirements",
         ],
     ),
 }
@@ -842,134 +720,6 @@ class State:
                 self.save_series()
                 return
         raise RuntimeError(f"series #{series_id} not found")
-
-
-# --------------------------------------------------------------------------- #
-# technique library
-# --------------------------------------------------------------------------- #
-# A tiny key-value style store the agent curates across the run. Entries are
-# added only at series-close (step 4b) and only when the model feels strongly
-# about saving something. Each entry is free-form: prose describing a
-# technique/palette/approach, optionally with a python snippet that should
-# be drop-in usable under the art.py environment (numpy, pillow, scipy,
-# noise + stdlib). The model can also retire / supersede old entries when
-# they no longer represent its voice, so the library stays curated rather
-# than growing into a landfill.
-
-
-@dataclass
-class LibraryEntry:
-    id: int
-    name: str
-    when_to_use: str
-    description: str
-    code_snippet: str | None
-    created_at: str
-    created_in_series: int | None
-    retired: bool = False
-    retired_at: str | None = None
-    retired_reason: str | None = None
-    superseded_by: int | None = None
-
-    def to_dict(self) -> dict:
-        return {
-            "id": self.id,
-            "name": self.name,
-            "when_to_use": self.when_to_use,
-            "description": self.description,
-            "code_snippet": self.code_snippet,
-            "created_at": self.created_at,
-            "created_in_series": self.created_in_series,
-            "retired": self.retired,
-            "retired_at": self.retired_at,
-            "retired_reason": self.retired_reason,
-            "superseded_by": self.superseded_by,
-        }
-
-    @staticmethod
-    def from_dict(d: dict) -> "LibraryEntry":
-        return LibraryEntry(
-            id=d["id"],
-            name=d["name"],
-            when_to_use=d.get("when_to_use", ""),
-            description=d.get("description", ""),
-            code_snippet=d.get("code_snippet"),
-            created_at=d.get("created_at", ""),
-            created_in_series=d.get("created_in_series"),
-            retired=bool(d.get("retired", False)),
-            retired_at=d.get("retired_at"),
-            retired_reason=d.get("retired_reason"),
-            superseded_by=d.get("superseded_by"),
-        )
-
-
-class Library:
-    """Persistent view over state/library.json."""
-
-    def __init__(self) -> None:
-        self.entries: list[LibraryEntry] = self._load()
-
-    @staticmethod
-    def _load() -> list[LibraryEntry]:
-        if not LIBRARY_JSON.exists():
-            return []
-        data = json.loads(LIBRARY_JSON.read_text(encoding="utf-8"))
-        return [LibraryEntry.from_dict(e) for e in data.get("entries", [])]
-
-    def save(self) -> None:
-        LIBRARY_JSON.write_text(
-            json.dumps(
-                {"entries": [e.to_dict() for e in self.entries]},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-
-    def active(self) -> list[LibraryEntry]:
-        return [e for e in self.entries if not e.retired]
-
-    def by_id(self, entry_id: int) -> LibraryEntry | None:
-        for e in self.entries:
-            if e.id == entry_id:
-                return e
-        return None
-
-    def add(
-        self,
-        *,
-        name: str,
-        when_to_use: str,
-        description: str,
-        code_snippet: str | None,
-        series_id: int | None,
-    ) -> LibraryEntry:
-        new_id = (max((e.id for e in self.entries), default=0)) + 1
-        e = LibraryEntry(
-            id=new_id,
-            name=name.strip(),
-            when_to_use=when_to_use.strip(),
-            description=description.strip(),
-            code_snippet=(code_snippet.strip() if code_snippet else None) or None,
-            created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            created_in_series=series_id,
-        )
-        self.entries.append(e)
-        self.save()
-        return e
-
-    def retire(
-        self, entry_id: int, *, reason: str, superseded_by: int | None = None
-    ) -> LibraryEntry | None:
-        e = self.by_id(entry_id)
-        if e is None or e.retired:
-            return None
-        e.retired = True
-        e.retired_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        e.retired_reason = (reason or "").strip() or None
-        e.superseded_by = superseded_by
-        self.save()
-        return e
 
 
 # --------------------------------------------------------------------------- #
@@ -1456,25 +1206,21 @@ def _progress_block(state: State) -> str:
         phase = (
             "РАННЯЯ ФАЗА — исследуй широко. Почти в каждой серии меняй "
             "алгоритмическое ядро / палитровую логику / композиционную "
-            "грамматику. Библиотеку приёмов собирай скупо — записывай только "
-            "то, что реально хочется вытащить потом."
+            "грамматику. Сейчас важнее нащупать диапазон собственного языка, "
+            "чем закреплять отдельные находки как окончательные."
         )
     elif frac < 0.70:
         phase = (
             "СРЕДНЯЯ ФАЗА — начинай консолидироваться. Уже видно, что именно "
-            "твоё; пробуй соединять находки между сериями. Новые записи в "
-            "библиотеку — только если правда открылся отдельный приём, а не "
-            "вариация уже записанного; при случае списывай записи, которые "
-            "перестали звучать твоими."
+            "твоё; пробуй соединять находки между сериями и превращать "
+            "случайные удачи в осознанные художественные решения."
         )
     else:
         phase = (
             "ПОЗДНЯЯ ФАЗА — пора эксплуатировать. Работа должна быть "
-            "узнаваемо твоей: опирайся на собранную библиотеку приёмов и "
-            "сложившийся язык. При этом не коллапсируй в одну картинку — "
-            "каждая серия всё равно обязана отличаться от предыдущих по ≥2 "
-            "осям. Новые записи в библиотеку — почти не нужны; списание "
-            "устаревшего — нормально."
+            "узнаваемо твоей: опирайся на уже сложившийся язык. При этом не "
+            "коллапсируй в одну картинку — каждая серия всё равно обязана "
+            "отличаться от предыдущих по ≥2 осям."
         )
     return (
         f"Серия #{position} из ~{EXPECTED_SERIES} запланированных "
@@ -1483,91 +1229,11 @@ def _progress_block(state: State) -> str:
     )
 
 
-def _library_memory_block(library: Library) -> str:
-    """Compact view of the active technique library. Hidden entirely when
-    empty, so the model doesn't feel compelled to fill it.
-    """
-    active = library.active()
-    if not active:
-        return (
-            "(библиотека приёмов пока пуста — в начале пути это нормально; "
-            "записывай только то, о чём правда хочется вспомнить)"
-        )
-    lines: list[str] = []
-    for e in active:
-        head = f"- #{e.id} «{e.name}»"
-        if e.created_in_series is not None:
-            head += f" (из серии #{e.created_in_series})"
-        lines.append(head)
-        lines.append(f"    Когда доставать: {e.when_to_use}")
-        # keep descriptions terse on the wire; the model has full access to
-        # library.json on disk if it needed the raw dump, but we don't want
-        # to bloat every prompt.
-        desc = e.description.strip().replace("\n", " ")
-        if len(desc) > 320:
-            desc = desc[:317] + "..."
-        lines.append(f"    Что это: {desc}")
-        if e.code_snippet:
-            lines.append("    (есть код-фрагмент)")
-    return "\n".join(lines)
-
-
-# Maximum chars we'll embed of a single snippet when building the step-1
-# "expanded" library block. Long snippets get tail-truncated; model can
-# work from the head + description.
-_SNIPPET_MAX_CHARS = 1200
-
-
-def _library_detailed_block(library: Library) -> str:
-    """Full library dump for step 1: every active entry with its full
-    description and, when available, its code snippet. This is the
-    *reach-for-it* view — the model needs enough context to actually
-    reuse an entry, not just know it exists.
-
-    Returns empty string when the library is empty, so the caller can
-    drop the whole section.
-    """
-    active = library.active()
-    if not active:
-        return ""
-    parts: list[str] = []
-    for e in active:
-        origin = (
-            f" (из серии #{e.created_in_series})"
-            if e.created_in_series is not None
-            else ""
-        )
-        parts.append(f"### #{e.id} — «{e.name}»{origin}")
-        parts.append(f"**Когда доставать.** {e.when_to_use.strip()}")
-        parts.append(f"**Что это.** {e.description.strip()}")
-        if e.code_snippet:
-            snippet = e.code_snippet.strip()
-            if len(snippet) > _SNIPPET_MAX_CHARS:
-                snippet = (
-                    snippet[:_SNIPPET_MAX_CHARS]
-                    + f"\n# ... (обрезано, полный код в library.json — "
-                    f"{len(e.code_snippet)} симв.)"
-                )
-            parts.append("```python")
-            parts.append(snippet)
-            parts.append("```")
-        parts.append("")  # blank line between entries
-    return "\n".join(parts).rstrip()
-
-
-def _full_memory(
-    state: State, path_obj: dict | None, library: Library | None = None
-) -> str:
+def _full_memory(state: State, path_obj: dict | None) -> str:
     progress = _progress_block(state)
     progress_section = ""
     if progress:
         progress_section = f"## Где мы на пути\n\n{progress}\n\n"
-    library_section = ""
-    if library is not None:
-        library_section = (
-            "## Библиотека приёмов (копится между сериями)\n\n"
-            f"{_library_memory_block(library)}\n\n"
-        )
     return (
         "# Состояние памяти\n\n"
         f"{progress_section}"
@@ -1575,7 +1241,6 @@ def _full_memory(
         f"{_series_memory_block(state)}\n\n"
         "## artistic_path\n\n"
         f"{_path_memory_block(path_obj)}\n\n"
-        f"{library_section}"
         "## Последние записи дневника\n\n"
         f"{_diary_memory_block(state)}\n"
     )
@@ -1591,7 +1256,6 @@ class Ctx:
     n: int
     state: State
     path_obj: dict | None
-    library: Library
 
 
 def _pick_series_survey_pngs(state: State, cur: Series, k: int) -> list[Path]:
@@ -1742,36 +1406,13 @@ def step1_create(ctx: Ctx) -> None:
             "сменить палитру, композицию или алгоритмическое ядро."
         )
 
-    # Detailed library block for step 1: the model needs the full
-    # description + code snippet to actually reach for an entry, not just
-    # know it exists. The compact view in _full_memory is for other steps.
-    lib_detail_block = ""
-    lib_detail = _library_detailed_block(ctx.library)
-    if lib_detail:
-        lib_detail_block = (
-            "\n\n## Библиотека приёмов — полные записи\n\n"
-            "Это твой собственный архив находок из прошлых серий. Используй "
-            "его как художник использует свои альбомы: если какая-то запись "
-            "по описанию `Когда доставать` точно отвечает задаче этой "
-            "итерации — возьми её, вплети в работу, разверни её дальше. "
-            "Совсем не обязательно доставать что-то каждый раз; но если "
-            "поздняя фаза прогона, а ты ни разу не оперся на библиотеку — "
-            "это повод задаться вопросом, зачем ты тогда её собирал.\n\n"
-            "В комментарии `# Preserved:` прямо упомяни, какой записью (#id) "
-            "ты воспользовался, если воспользовался. Не копируй код "
-            "буквально — адаптируй под текущую серию, меняй параметры, "
-            "соединяй с другими приёмами.\n\n"
-            f"{lib_detail}"
-        )
-
     # Build text section first, images second (vision payload).
     text = (
-        f"{_full_memory(ctx.state, ctx.path_obj, ctx.library)}\n\n"
+        f"{_full_memory(ctx.state, ctx.path_obj)}\n\n"
         f"## Предыдущий art.py\n\n"
         f"```python\n{prev_art[:12000]}\n```"
         f"{prov_block}"
         f"{contract_block}"
-        f"{lib_detail_block}"
         f"{sim_text}\n\n"
         f"## Задача — Шаг 1 (итерация {ctx.n:03d})\n\n"
         f"{cur_block}\n\n"
@@ -1784,8 +1425,7 @@ def step1_create(ctx: Ctx) -> None:
         f"{IMAGE_SIZE} в CWD. "
         "В начале файла — обязательные комментарии Iteration/Seed/Series/"
         "Preserved/Mutated. В Preserved перечисли, что удерживается от "
-        "предыдущей работы (и если ты опираешься на запись библиотеки — "
-        "укажи её как `library #<id>`); в Mutated — ровно ту ось, которую "
+        "предыдущей работы; в Mutated — ровно ту ось, которую "
         "меняешь сейчас (одну-две, не все сразу).\n\n"
         "Ответь **только исходным кодом Python** — без JSON, без пояснений, "
         "без markdown-обёртки. Первая строка ответа должна быть первой "
@@ -1981,7 +1621,7 @@ def step3_observe(ctx: Ctx, png: Path) -> dict:
         {
             "type": "text",
             "text": (
-                f"{_full_memory(ctx.state, ctx.path_obj, ctx.library)}\n\n"
+                f"{_full_memory(ctx.state, ctx.path_obj)}\n\n"
                 f"## Задача — Шаг 3 (итерация {ctx.n:03d})\n\n"
                 "Посмотри на изображение и верни JSON строго по схеме "
                 "Observation:\n"
@@ -2089,7 +1729,7 @@ def step4_diary(ctx: Ctx, observation: dict, measured_sim: float | None) -> dict
         )
 
     user = (
-        f"{_full_memory(ctx.state, ctx.path_obj, ctx.library)}\n\n"
+        f"{_full_memory(ctx.state, ctx.path_obj)}\n\n"
         f"## Наблюдение (итерация {ctx.n:03d}) — структурированно\n\n"
         f"{obs_block}"
         f"{sim_block}\n\n"
@@ -2173,7 +1813,7 @@ def step4_diary(ctx: Ctx, observation: dict, measured_sim: float | None) -> dict
 
 
 def step4b_series_retrospective(
-    state: State, series: Series, path_obj: dict | None, library: Library
+    state: State, series: Series, path_obj: dict | None
 ) -> dict | None:
     """Show the model every image of the just-closed series and ask for an
     arc-level retrospective. Returns the retrospective dict, or None if the
@@ -2210,34 +1850,8 @@ def step4b_series_retrospective(
     # drop the just-closed series itself, if it sneaks in
     past_closers = [(s, p) for s, p in past_closers if s.id != series.id]
 
-    # Mirror for the model: how often did *you* touch the library recently?
-    # Helps counteract the "one addition per series" attractor we observed.
-    recent_window = 5
-    closed_so_far = [s for s in state.series if not s.is_open() and s.id != series.id]
-    mirror_block = ""
-    if closed_so_far:
-        recent = closed_so_far[-recent_window:]
-        touched = sum(
-            1
-            for s in recent
-            if any(e.created_in_series == s.id for e in library.entries)
-        )
-        total_active = len(library.active())
-        total_retired = len(library.entries) - total_active
-        mirror_block = (
-            "\n\n## Зеркало твоих привычек с библиотекой\n\n"
-            f"За последние {len(recent)} закрытых серии ты пополнял "
-            f"библиотеку в **{touched}** из них. В библиотеке сейчас "
-            f"{total_active} активных записи и {total_retired} списанных. "
-            "Если ты пополнял почти каждую серию — это не архив, а "
-            "механическое ведение журнала; хорошая библиотека растёт "
-            "скачками и подолгу стоит неизменной, пока твой язык "
-            "действительно не сдвинется. `library_decision='nothing'` — "
-            "это полноценный, честный ответ, а не отказ от работы."
-        )
-
     header = (
-        f"{_full_memory(state, path_obj, library)}\n\n"
+        f"{_full_memory(state, path_obj)}\n\n"
         f"## Задача — Шаг 4b (Ретроспектива серии)\n\n"
         f"Серия #{series.id} «{series.name}» только что закрылась "
         f"на итерации {series.closed_at}. Её тезис был:\n"
@@ -2257,40 +1871,7 @@ def step4b_series_retrospective(
         "общего пути). Верни JSON SeriesRetrospective — поэтическое имя "
         f"всей серии (может совпадать с «{series.name}» или уточнять его), "
         "3–5 предложений об арке, что проявилось, что разочаровало, "
-        "короткий вердикт, и мост к следующей серии.\n\n"
-        "## Решение о библиотеке приёмов\n\n"
-        "Схема требует от тебя сначала выбрать глагол в поле "
-        "`library_decision`, а уже потом заполнять слоты. Варианты:\n\n"
-        "- **`nothing`** — ничего не меняем в библиотеке. Это значение "
-        "  по умолчанию и самый частый случай. Выбери его, если в этой "
-        "  серии ты просто развивал ранее записанный приём, либо если "
-        "  находка ещё не устоялась. Заполни `nothing_reason` одной "
-        "  фразой, и оба массива оставь пустыми.\n"
-        "- **`add`** — добавляем ровно одну (очень редко две) запись в "
-        "  `library_additions`. Выбирай только если по тебе действительно "
-        "  прошло что-то отдельное, к чему ты захочешь возвращаться в "
-        "  будущих сериях. Если подобная запись уже есть — лучше "
-        "  `add_and_retire` (добавить более точную, старую списать) или "
-        "  просто `nothing`, чем плодить дубликат.\n"
-        "- **`retire`** — списываем одну или несколько устаревших записей "
-        "  через `library_retirements`, ничего не добавляя. Библиотека "
-        "  должна сокращаться так же часто, как и расти.\n"
-        "- **`add_and_retire`** — одновременная замена: обычно одна "
-        "  запись в `library_additions` и одна в `library_retirements` "
-        "  с `superseded_by: 0`.\n\n"
-        "**Если в `library_additions` ты даёшь `code_snippet`, он должен "
-        "быть рабочим.** Не заглушки вроде `def foo(): pass`, не `# "
-        "simplified logic here`, не однострочные сигнатуры без тела. "
-        f"Минимум ~{MIN_SNIPPET_CHARS} символов осмысленного кода. "
-        "Если ты не готов написать настоящую реализацию — ставь "
-        "`code_snippet: null` и оставь только словесное описание; это "
-        "лучше, чем формально-правильный, но бесполезный стуб. Харнесс "
-        "выбросит стуб и оставит только описание, и это будет "
-        "зафиксировано в логах.\n\n"
-        "Библиотека — подспорье, а не каркас. Она растёт скачками и "
-        "подолгу не меняется. В ранних сериях её почти нет; в поздних "
-        "ты реже пишешь в неё и чаще опираешься на уже собранное."
-        f"{mirror_block}"
+        "короткий вердикт, и мост к следующей серии."
     )
 
     content: list[dict] = [{"type": "text", "text": header}]
@@ -2390,7 +1971,7 @@ def step5_path(ctx: Ctx, force: bool = False) -> dict | None:
     )
     is_first = ctx.n == 1 and first_time
     user = (
-        f"{_full_memory(ctx.state, ctx.path_obj, ctx.library)}\n\n## Задача — Шаг 5\n\n"
+        f"{_full_memory(ctx.state, ctx.path_obj)}\n\n## Задача — Шаг 5\n\n"
         + (
             "Это итерация 001. Верни JSON ArtisticPath: поле `opening` "
             "заполни одной-двумя фразами, остальные поля заполни "
@@ -2505,13 +2086,9 @@ def render_path(path_obj: dict | None) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def refresh_markdown(
-    state: State, path_obj: dict | None, library: Library | None = None
-) -> None:
+def refresh_markdown(state: State, path_obj: dict | None) -> None:
     write_text(DIARY_PATH, render_diary(state))
     write_text(PATH_MD, render_path(path_obj))
-    if library is not None:
-        write_text(LIBRARY_MD, render_library(library))
 
 
 # --------------------------------------------------------------------------- #
@@ -2523,8 +2100,6 @@ def _ensure_open_series(
     state: State,
     at_iter: int,
     proposal: dict | None = None,
-    *,
-    library: Library | None = None,
 ) -> Series:
     """Open a new series at `at_iter` if none is currently open."""
     cur = state.current_series()
@@ -2541,7 +2116,7 @@ def _ensure_open_series(
     # no proposal — ask the model in a tiny targeted call
     log.warning("    no open series and no proposal; asking model to name one")
     user = (
-        f"{_full_memory(state, load_path_json(), library)}\n\n"
+        f"{_full_memory(state, load_path_json())}\n\n"
         "## Задача\n\nТекущей открытой серии нет, а харнессу она нужна. "
         "Предложи имя и тезис новой серии, которая осмысленно следует из "
         "прошлого пути. Также укажи:\n"
@@ -2601,236 +2176,10 @@ def _ensure_open_series(
     )
 
 
-# Minimum length a meaningful snippet should have (after stripping). Below
-# this we'd rather have no snippet than a one-liner signature.
-MIN_SNIPPET_CHARS = 200
-
-# Patterns that strongly indicate a stub instead of a real implementation.
-# The test (in `_is_stub_snippet`) requires at least one of these **plus**
-# a small actual-code budget before rejecting; a long real snippet that
-# merely mentions "simplified" in a passing comment is fine.
-_STUB_PATTERNS = (
-    re.compile(r"\bpass\b\s*$", re.MULTILINE),
-    re.compile(r"\.\.\.\s*$", re.MULTILINE),  # bare `...` ellipsis body
-    re.compile(r"#\s*simplified", re.IGNORECASE),
-    re.compile(r"#\s*conceptual", re.IGNORECASE),
-    re.compile(r"#\s*logic\s+(to|for|here)", re.IGNORECASE),
-    re.compile(r"#\s*(draw|compute|implement).*\s+here", re.IGNORECASE),
-    re.compile(r"#\s*implementation\s+(of|for|goes)", re.IGNORECASE),
-    re.compile(r"#\s*your\s+(code|logic)\s+here", re.IGNORECASE),
-)
-
-
-def _strip_code_content(src: str) -> str:
-    """Return source with comments and blank lines stripped, so we can
-    measure how much *actual* code there is."""
-    out: list[str] = []
-    for raw in src.splitlines():
-        line = raw.split("#", 1)[0].rstrip()
-        if line.strip():
-            out.append(line)
-    return "\n".join(out)
-
-
-def _is_stub_snippet(snippet: str) -> tuple[bool, str]:
-    """Decide whether `snippet` is a stub. Returns (is_stub, reason)."""
-    s = snippet.strip()
-    if not s:
-        return True, "empty"
-    if len(s) < MIN_SNIPPET_CHARS:
-        return True, f"too short ({len(s)} < {MIN_SNIPPET_CHARS} chars)"
-    code_only = _strip_code_content(s)
-    if len(code_only) < MIN_SNIPPET_CHARS // 2:
-        return True, f"mostly comments (code={len(code_only)} chars)"
-    code_lines = [ln for ln in code_only.splitlines() if ln.strip()]
-    # A real implementation almost always has 3+ non-comment lines.
-    if len(code_lines) < 3:
-        return True, f"only {len(code_lines)} non-comment code line(s)"
-    for pat in _STUB_PATTERNS:
-        m = pat.search(s)
-        if m:
-            return True, f"stub marker: {m.group(0)!r}"
-    return False, ""
-
-
-def _apply_library_changes(
-    library: Library,
-    retro: dict,
-    *,
-    series_id: int,
-) -> None:
-    """Honor library_additions / library_retirements from a retrospective.
-
-    The model must first pick a `library_decision` enum value. The harness:
-    - Drops additions/retirements that the chosen decision doesn't permit
-      (so the model can't quietly 'nothing' + attach an addition anyway).
-    - Rejects obviously thin additions and stubby code_snippets.
-    - Logs 'nothing' with its reason for posterity.
-
-    We tolerate the model setting `superseded_by: 0` as a sentinel meaning
-    "the entry I just added in this same retrospective". With a single-
-    addition retrospective that's unambiguous; with multiple we pick the
-    first addition's id (rare and not worth more machinery).
-    """
-    decision = (retro.get("library_decision") or "").strip()
-    nothing_reason = (retro.get("nothing_reason") or "").strip() or None
-    raw_additions = retro.get("library_additions") or []
-    raw_retirements = retro.get("library_retirements") or []
-
-    if decision not in {"nothing", "add", "retire", "add_and_retire"}:
-        log.warning(
-            "    library_decision is missing/invalid (%r); treating as 'nothing'",
-            decision,
-        )
-        decision = "nothing"
-
-    # Honor the gate: drop slots the decision doesn't allow, and log loudly
-    # when the model contradicted itself (decision=nothing but included an
-    # addition, etc.). This is the main reason the enum exists.
-    allow_add = decision in {"add", "add_and_retire"}
-    allow_retire = decision in {"retire", "add_and_retire"}
-    if raw_additions and not allow_add:
-        log.warning(
-            "    library_decision=%r but %d addition(s) attached; discarding",
-            decision,
-            len(raw_additions),
-        )
-        raw_additions = []
-    if raw_retirements and not allow_retire:
-        log.warning(
-            "    library_decision=%r but %d retirement(s) attached; discarding",
-            decision,
-            len(raw_retirements),
-        )
-        raw_retirements = []
-
-    if decision == "nothing":
-        log.info(
-            "    library: nothing (series #%d) — %s",
-            series_id,
-            nothing_reason or "reason not given",
-        )
-        return
-
-    added_ids: list[int] = []
-    for a in raw_additions:
-        name = (a.get("name") or "").strip()
-        desc = (a.get("description") or "").strip()
-        when = (a.get("when_to_use") or "").strip()
-        # refuse obviously empty additions so the library doesn't fill with
-        # noise; ditto for absurdly short ones.
-        if len(name) < 3 or len(desc) < 20 or len(when) < 5:
-            log.warning(
-                "    skipping library addition with too-thin content: "
-                "name=%r when=%r desc_len=%d",
-                name,
-                when,
-                len(desc),
-            )
-            continue
-        # Sanity-check the code_snippet: if the model provided one, it has
-        # to be a real implementation, not a `def foo(): pass` / `# logic
-        # here` stub. If it fails the check, drop the snippet (keep the
-        # written entry) and log — we prefer "description only" over "lie
-        # that says it has code".
-        snippet = a.get("code_snippet")
-        if snippet:
-            stub, why = _is_stub_snippet(snippet)
-            if stub:
-                log.warning(
-                    "    library addition «%s»: code_snippet looks stubby "
-                    "(%s); storing entry without snippet",
-                    name,
-                    why,
-                )
-                snippet = None
-        entry = library.add(
-            name=name,
-            when_to_use=when,
-            description=desc,
-            code_snippet=snippet,
-            series_id=series_id,
-        )
-        added_ids.append(entry.id)
-        log.info(
-            "    library: +#%d «%s» (from series #%d)%s",
-            entry.id,
-            entry.name,
-            series_id,
-            " [+code]" if entry.code_snippet else "",
-        )
-
-    for r in raw_retirements:
-        eid = r.get("entry_id")
-        if not isinstance(eid, int):
-            continue
-        superseded_raw = r.get("superseded_by")
-        superseded: int | None = None
-        if isinstance(superseded_raw, int):
-            if superseded_raw == 0 and added_ids:
-                superseded = added_ids[0]
-            elif superseded_raw > 0 and library.by_id(superseded_raw) is not None:
-                superseded = superseded_raw
-        retired = library.retire(
-            eid,
-            reason=r.get("reason", ""),
-            superseded_by=superseded,
-        )
-        if retired is None:
-            log.warning(
-                "    library retirement: id #%d not found or already retired", eid
-            )
-        else:
-            log.info(
-                "    library: -#%d «%s» retired%s",
-                retired.id,
-                retired.name,
-                f" (superseded by #{superseded})" if superseded else "",
-            )
-
-
-def render_library(library: Library) -> str:
-    """Render a human-readable view of the library for the exhibition dir."""
-    if not library.entries:
-        return ""
-    lines = ["# Библиотека приёмов\n"]
-    active = [e for e in library.entries if not e.retired]
-    retired = [e for e in library.entries if e.retired]
-    if active:
-        lines.append("## Активные")
-        lines.append("")
-        for e in active:
-            origin = (
-                f" (из серии #{e.created_in_series})"
-                if e.created_in_series is not None
-                else ""
-            )
-            lines.append(f"### #{e.id} — {e.name}{origin}")
-            lines.append(f"*Когда доставать:* {e.when_to_use}")
-            lines.append("")
-            lines.append(e.description.strip())
-            lines.append("")
-            if e.code_snippet:
-                lines.append("```python")
-                lines.append(e.code_snippet.strip())
-                lines.append("```")
-                lines.append("")
-    if retired:
-        lines.append("## Списаны")
-        lines.append("")
-        for e in retired:
-            supp = f", заменена на #{e.superseded_by}" if e.superseded_by else ""
-            lines.append(
-                f"- #{e.id} «{e.name}» — "
-                f"{e.retired_reason or 'причина не указана'}{supp}"
-            )
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def one_cycle(state: State, library: Library) -> None:
+def one_cycle(state: State) -> None:
     n = state.next_iteration_number()
     path_obj = load_path_json()
-    ctx = Ctx(n=n, state=state, path_obj=path_obj, library=library)
+    ctx = Ctx(n=n, state=state, path_obj=path_obj)
     log.info("=== iteration %03d ===", n)
 
     # ensure we have an open series BEFORE step 1 so its metadata can bake
@@ -2838,7 +2187,7 @@ def one_cycle(state: State, library: Library) -> None:
     # a provisional series whose name/thesis comes from the path (if any) or
     # the model itself.
     if state.current_series() is None:
-        _ensure_open_series(state, at_iter=n, library=library)
+        _ensure_open_series(state, at_iter=n)
 
     step1_create(ctx)
     png = step2_render(ctx)
@@ -2913,16 +2262,15 @@ def one_cycle(state: State, library: Library) -> None:
 
     # Шаг 4b — retrospective on the just-closed series (before opening next)
     if closed_this_cycle and closed_series_ref is not None:
-        retro = step4b_series_retrospective(state, closed_series_ref, path_obj, library)
+        retro = step4b_series_retrospective(state, closed_series_ref, path_obj)
         if retro is not None:
             state.set_series_retrospective(closed_series_ref.id, retro)
-            _apply_library_changes(library, retro, series_id=closed_series_ref.id)
 
     # if closed, try to immediately open the next series using the proposal
     if closed_this_cycle:
         proposal = diary.get("proposed_next_series")
         # iter N is the last of the closed series; the NEW series opens at N+1
-        _ensure_open_series(state, at_iter=n + 1, proposal=proposal, library=library)
+        _ensure_open_series(state, at_iter=n + 1, proposal=proposal)
 
     # step 5 — rewrite path. Force-rewrite on series boundary.
     new_path = step5_path(ctx, force=closed_this_cycle)
@@ -2930,7 +2278,7 @@ def one_cycle(state: State, library: Library) -> None:
         path_obj = new_path
 
     # always refresh markdown views
-    refresh_markdown(state, path_obj, library)
+    refresh_markdown(state, path_obj)
     log.info("=== iteration %03d done ===", n)
 
 
@@ -2942,17 +2290,10 @@ def main() -> None:
         OUTPUT_DIR,
     )
     state = State()
-    library = Library()
-    log.info(
-        "loaded state: %d series, %d iterations, library: %d active / %d total",
-        len(state.series),
-        len(state.iterations),
-        len(library.active()),
-        len(library.entries),
-    )
+    log.info("loaded state: %d series, %d iterations", len(state.series), len(state.iterations))
     while True:
         try:
-            one_cycle(state, library)
+            one_cycle(state)
         except KeyboardInterrupt:
             log.info("interrupted by user, bye")
             return
