@@ -85,11 +85,6 @@ LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "180"))
 MIN_SERIES_LEN = int(os.getenv("MIN_SERIES_LEN", "7"))
 SOFT_MAX_SERIES_LEN = int(os.getenv("SOFT_MAX_SERIES_LEN", "12"))
 HARD_MAX_SERIES_LEN = int(os.getenv("HARD_MAX_SERIES_LEN", "15"))
-# Expected total number of series for the whole run. Drives the
-# explore/exploit framing the model sees. 0 disables progress framing
-# (infinite / unknown run).
-EXPECTED_SERIES = int(os.getenv("EXPECTED_SERIES", "12"))
-
 # Rendered image resolution. Injected into the prompt so the LLM doesn't
 # hardcode a mismatched number. Change only if you also change consumers
 # (e.g. make_video.py).
@@ -228,7 +223,6 @@ def _build_system_prompt() -> str:
         "HARD_MAX_SERIES_LEN": str(HARD_MAX_SERIES_LEN),
         "SIM_STRONG_REPEAT": f"{SIM_STRONG_REPEAT:.2f}",
         "SIM_MILD_REPEAT": f"{SIM_MILD_REPEAT:.2f}",
-        "EXPECTED_SERIES": str(EXPECTED_SERIES) if EXPECTED_SERIES > 0 else "—",
     }
     out = SYSTEM_PROMPT_TEMPLATE
     for k, v in subs.items():
@@ -1185,58 +1179,9 @@ def _series_memory_block(state: State) -> str:
     )
 
 
-def _progress_block(state: State) -> str:
-    """Tell the model roughly where it is on the planned arc, and nudge it
-    from 'explore' toward 'exploit' as the run progresses. When
-    EXPECTED_SERIES is 0 we skip this block (unknown horizon).
-    """
-    if EXPECTED_SERIES <= 0:
-        return ""
-    closed = [s for s in state.series if not s.is_open()]
-    completed = len(closed)
-    cur = state.current_series()
-    in_progress = 1 if cur is not None else 0
-    # "index of the series currently being worked on" is closed+1 while cur
-    # is open; we show it as a 1-based position.
-    position = completed + in_progress
-    position = max(1, position)
-    frac = min(1.0, position / EXPECTED_SERIES)
-    # three soft phases, just as a framing for the model
-    if frac < 0.33:
-        phase = (
-            "РАННЯЯ ФАЗА — исследуй широко. Почти в каждой серии меняй "
-            "алгоритмическое ядро / палитровую логику / композиционную "
-            "грамматику. Сейчас важнее нащупать диапазон собственного языка, "
-            "чем закреплять отдельные находки как окончательные."
-        )
-    elif frac < 0.70:
-        phase = (
-            "СРЕДНЯЯ ФАЗА — начинай консолидироваться. Уже видно, что именно "
-            "твоё; пробуй соединять находки между сериями и превращать "
-            "случайные удачи в осознанные художественные решения."
-        )
-    else:
-        phase = (
-            "ПОЗДНЯЯ ФАЗА — пора эксплуатировать. Работа должна быть "
-            "узнаваемо твоей: опирайся на уже сложившийся язык. При этом не "
-            "коллапсируй в одну картинку — каждая серия всё равно обязана "
-            "отличаться от предыдущих по ≥2 осям."
-        )
-    return (
-        f"Серия #{position} из ~{EXPECTED_SERIES} запланированных "
-        f"(завершено: {completed}).\n"
-        f"{phase}"
-    )
-
-
 def _full_memory(state: State, path_obj: dict | None) -> str:
-    progress = _progress_block(state)
-    progress_section = ""
-    if progress:
-        progress_section = f"## Где мы на пути\n\n{progress}\n\n"
     return (
         "# Состояние памяти\n\n"
-        f"{progress_section}"
         "## Серии\n\n"
         f"{_series_memory_block(state)}\n\n"
         "## artistic_path\n\n"
