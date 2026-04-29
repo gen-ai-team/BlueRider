@@ -112,6 +112,33 @@ STEP1_PAST_SERIES_SURVEY = int(os.getenv("STEP1_PAST_SERIES_SURVEY", "4"))
 # surfaces them to steps 3/4/1 so the model can react to repetition.
 SIMILARITY_WINDOW = int(os.getenv("SIMILARITY_WINDOW", "6"))
 
+SERIES_DIFF_AXES = [
+    "palette",
+    "composition",
+    "shape_family",
+    "density",
+    "symmetry",
+    "algorithmic_kernel",
+    "scale",
+    "texture",
+]
+
+PATH_FIELDS = [
+    ("opening", "Начальная мысль"),
+    ("what_attracts_me", "Что меня притягивает"),
+    ("what_i_dislike", "Что мне не нравится"),
+    ("what_works", "Что у меня получается"),
+    ("where_i_stumble", "Где я спотыкаюсь"),
+    ("emerging_language", "Мой формирующийся язык"),
+    ("current_series", "Текущая серия"),
+    ("next_hypothesis", "Следующая гипотеза"),
+]
+
+ART_PYTHON = ""
+SYSTEM_PROMPT = ""
+client: OpenAI | None = None
+log = logging.getLogger("art")
+
 
 def _resolve_art_python() -> str:
     """Pick the interpreter used to run art.py. It must have pillow/numpy/
@@ -136,9 +163,6 @@ def _resolve_art_python() -> str:
     return sys.executable
 
 
-ART_PYTHON = _resolve_art_python()
-
-
 # --------------------------------------------------------------------------- #
 # setup
 # --------------------------------------------------------------------------- #
@@ -154,9 +178,6 @@ def _parse_args() -> argparse.Namespace:
     return ap.parse_args()
 
 
-ARGS = _parse_args()
-
-
 def _wipe_output_dir() -> None:
     """Remove everything under OUTPUT_DIR."""
     if OUTPUT_DIR.exists():
@@ -167,50 +188,45 @@ def _wipe_output_dir() -> None:
                 child.unlink()
 
 
-if ARGS.fresh:
-    _wipe_output_dir()
+def _prepare_output_dirs(*, fresh: bool) -> None:
+    if fresh:
+        _wipe_output_dir()
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    ITER_DIR.mkdir(parents=True, exist_ok=True)
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-STATE_DIR.mkdir(parents=True, exist_ok=True)
-ITER_DIR.mkdir(parents=True, exist_ok=True)
-DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(LOG_PATH, encoding="utf-8"),
-    ],
-)
-log = logging.getLogger("art")
-
-if not os.getenv("OPENAI_API_KEY"):
-    log.error("OPENAI_API_KEY is not set. Put it in .env or export it.")
-    sys.exit(1)
-
-# Guard against leftover art_*.png from a previous (markdown-based) run when
-# state/ is empty. Refuse rather than silently conflating regimes.
-_pngs = list(OUTPUT_DIR.glob("art_*.png"))
-_has_state = SERIES_JSON.exists()
-if _pngs and not _has_state:
-    log.error(
-        "Found %d art_*.png files in %s but no state/ directory. "
-        "Either archive them or re-run with --fresh to wipe OUTPUT_DIR.",
-        len(_pngs),
-        OUTPUT_DIR,
+def _configure_logging() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(LOG_PATH, encoding="utf-8"),
+        ],
+        force=True,
     )
-    sys.exit(1)
 
-client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    base_url=os.getenv("OPENAI_BASE_URL") or None,
-    timeout=LLM_TIMEOUT,
-)
 
-SYSTEM_PROMPT_TEMPLATE = PROMPT_PATH.read_text(encoding="utf-8")
+def _validate_startup() -> None:
+    if not os.getenv("OPENAI_API_KEY"):
+        log.error("OPENAI_API_KEY is not set. Put it in .env or export it.")
+        sys.exit(1)
+
+    # Guard against leftover art_*.png from a previous (markdown-based) run when
+    # state/ is empty. Refuse rather than silently conflating regimes.
+    pngs = list(OUTPUT_DIR.glob("art_*.png"))
+    if pngs and not SERIES_JSON.exists():
+        log.error(
+            "Found %d art_*.png files in %s but no state/ directory. "
+            "Either archive them or re-run with --fresh to wipe OUTPUT_DIR.",
+            len(pngs),
+            OUTPUT_DIR,
+        )
+        sys.exit(1)
 
 
 def _build_system_prompt() -> str:
@@ -224,7 +240,7 @@ def _build_system_prompt() -> str:
         "SIM_STRONG_REPEAT": f"{SIM_STRONG_REPEAT:.2f}",
         "SIM_MILD_REPEAT": f"{SIM_MILD_REPEAT:.2f}",
     }
-    out = SYSTEM_PROMPT_TEMPLATE
+    out = PROMPT_PATH.read_text(encoding="utf-8")
     for k, v in subs.items():
         out = out.replace("{{" + k + "}}", v)
     # Sanity: if any unresolved {{FOO}} template tokens remain, surface it —
@@ -233,10 +249,6 @@ def _build_system_prompt() -> str:
     if leftovers:
         log.warning("prompt has unresolved template tokens: %s", leftovers)
     return out
-
-
-SYSTEM_PROMPT = _build_system_prompt()
-
 
 def _check_art_python() -> None:
     """Verify the chosen interpreter can import the art dependencies."""
@@ -266,7 +278,21 @@ def _check_art_python() -> None:
     log.info("art interpreter: %s (pillow/numpy/scipy/noise OK)", ART_PYTHON)
 
 
-_check_art_python()
+def _bootstrap(args: argparse.Namespace) -> None:
+    global ART_PYTHON, SYSTEM_PROMPT, client
+
+    _prepare_output_dirs(fresh=args.fresh)
+    _configure_logging()
+    _validate_startup()
+
+    ART_PYTHON = _resolve_art_python()
+    _check_art_python()
+    SYSTEM_PROMPT = _build_system_prompt()
+    client = OpenAI(
+        api_key=os.getenv("OPENAI_API_KEY"),
+        base_url=os.getenv("OPENAI_BASE_URL") or None,
+        timeout=LLM_TIMEOUT,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -285,6 +311,37 @@ def _obj(
         "required": required if required is not None else list(properties.keys()),
         "additionalProperties": additional,
     }
+
+
+def _new_series_properties() -> dict[str, Any]:
+    return {
+        "name": {"type": "string"},
+        "thesis": {"type": "string"},
+        # force explicit commitment to what makes the new series visually
+        # different from everything done before. "verbal difference" alone is
+        # not enough.
+        "must_differ_from_previous_in": {
+            "type": "array",
+            "items": {"type": "string", "enum": SERIES_DIFF_AXES},
+            "minItems": 2,
+            "description": "At least two axes on which the new series must "
+            "visibly break with prior series. Not a wish - a contract.",
+        },
+        "forbidden_features": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Concrete things the new series must NOT contain "
+            "(e.g. 'ochre-on-indigo palette', 'central medallion', 'gaussian "
+            "glow', 'voronoi rendering'). Each item one short phrase.",
+        },
+    }
+
+
+SCHEMA_NEW_SERIES = {
+    "name": "NewSeries",
+    "strict": True,
+    "schema": _obj(_new_series_properties()),
+}
 
 
 SCHEMA_STEP3 = {
@@ -426,50 +483,7 @@ SCHEMA_STEP4 = {
             "proposed_next_series": {
                 "anyOf": [
                     {"type": "null"},
-                    _obj(
-                        {
-                            "name": {"type": "string"},
-                            "thesis": {"type": "string"},
-                            # force explicit commitment to what makes the new
-                            # series visually different from everything done
-                            # before. "verbal difference" alone is not enough.
-                            "must_differ_from_previous_in": {
-                                "type": "array",
-                                "items": {
-                                    "type": "string",
-                                    "enum": [
-                                        "palette",
-                                        "composition",
-                                        "shape_family",
-                                        "density",
-                                        "symmetry",
-                                        "algorithmic_kernel",
-                                        "scale",
-                                        "texture",
-                                    ],
-                                },
-                                "minItems": 2,
-                                "description": "At least two axes on which "
-                                "the new series must visibly break with "
-                                "prior series. Not a wish — a contract.",
-                            },
-                            "forbidden_features": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                                "description": "Concrete things the new "
-                                "series must NOT contain (e.g. 'ochre-on-"
-                                "indigo palette', 'central medallion', "
-                                "'gaussian glow', 'voronoi rendering'). "
-                                "Each item one short phrase.",
-                            },
-                        },
-                        required=[
-                            "name",
-                            "thesis",
-                            "must_differ_from_previous_in",
-                            "forbidden_features",
-                        ],
-                    ),
+                    SCHEMA_NEW_SERIES["schema"],
                 ],
             },
         },
@@ -493,14 +507,8 @@ SCHEMA_STEP5 = {
     "strict": True,
     "schema": _obj(
         {
-            "opening": {"type": ["string", "null"]},
-            "what_attracts_me": {"type": "string"},
-            "what_i_dislike": {"type": "string"},
-            "what_works": {"type": "string"},
-            "where_i_stumble": {"type": "string"},
-            "emerging_language": {"type": "string"},
-            "current_series": {"type": "string"},
-            "next_hypothesis": {"type": "string"},
+            key: {"type": ["string", "null"]} if key == "opening" else {"type": "string"}
+            for key, _ in PATH_FIELDS
         },
     ),
 }
@@ -653,18 +661,6 @@ class State:
             if s.is_open():
                 return s
         return None
-
-    def last_closed_series(self) -> Series | None:
-        for s in reversed(self.series):
-            if not s.is_open():
-                return s
-        return None
-
-    def iterations_in_series(self, series_id: int) -> list[dict]:
-        return [
-            self.iterations[i]
-            for i in next(s.iterations for s in self.series if s.id == series_id)
-        ]
 
     # -- mutations --
     def open_series(
@@ -830,6 +826,18 @@ def similarity_bucket(sim: float) -> str:
     if sim >= SIM_MILD_REPEAT:
         return "mild_repeat"
     return "novel"
+
+
+def previous_iteration_context(
+    state: State, fingerprint: dict | None = None
+) -> tuple[int | None, dict | None, float | None]:
+    if not state.iterations:
+        return None, None, None
+    prev_n = max(state.iterations)
+    prev_it = state.iterations.get(prev_n)
+    prev_fp = prev_it.get("fingerprint") if prev_it else None
+    measured_sim = similarity(fingerprint, prev_fp) if fingerprint and prev_fp else None
+    return prev_n, prev_fp, measured_sim
 
 
 # --------------------------------------------------------------------------- #
@@ -1088,18 +1096,8 @@ def llm_text(
 def _path_memory_block(path_obj: dict | None) -> str:
     if not path_obj:
         return "(artistic_path ещё не создан)"
-    fields_order = [
-        ("opening", "Начальная мысль"),
-        ("what_attracts_me", "Что меня притягивает"),
-        ("what_i_dislike", "Что мне не нравится"),
-        ("what_works", "Что у меня получается"),
-        ("where_i_stumble", "Где я спотыкаюсь"),
-        ("emerging_language", "Мой формирующийся язык"),
-        ("current_series", "Текущая серия"),
-        ("next_hypothesis", "Следующая гипотеза"),
-    ]
     lines = []
-    for key, label in fields_order:
+    for key, label in PATH_FIELDS:
         val = path_obj.get(key)
         if val:
             lines.append(f"- **{label}:** {val}")
@@ -1511,7 +1509,7 @@ def step2_render(ctx: Ctx) -> Path:
             f"Предыдущий `art.py` не отработал. Ошибка:\n\n"
             f"```\n{last_err}\n```\n\n"
             f"Текущий код:\n\n```python\n{broken}\n```\n\n"
-            f"Почини его. Файл должен сохранить `art_{ctx.n:03d}.png` 1024×1024 в CWD.\n\n"
+            f"Почини его. Файл должен сохранить `art_{ctx.n:03d}.png` {IMAGE_SIZE}×{IMAGE_SIZE} в CWD.\n\n"
             f"Ответь **только исходным кодом Python** — без JSON, без пояснений, "
             f"без markdown-обёртки. Первая строка ответа должна быть первой "
             f"строкой файла `art.py`."
@@ -1545,15 +1543,9 @@ def step3_observe(ctx: Ctx, png: Path) -> dict:
     # the model the number so its own `similarity_to_previous` field is
     # informed, not guessed.
     sim_hint = ""
-    prev_fp: dict | None = None
-    prev_n: int | None = None
-    if ctx.state.iterations:
-        prev_n = max(ctx.state.iterations)
-        prev_it = ctx.state.iterations.get(prev_n)
-        prev_fp = prev_it.get("fingerprint") if prev_it else None
-    if prev_fp is not None:
-        this_fp = compute_fingerprint(png)
-        sim = similarity(this_fp, prev_fp)
+    this_fp = compute_fingerprint(png)
+    prev_n, prev_fp, sim = previous_iteration_context(ctx.state, this_fp)
+    if prev_fp is not None and prev_n is not None and sim is not None:
         sim_hint = (
             f"\n\nХарнесс измерил визуальную схожесть этой работы с "
             f"art_{prev_n:03d}.png: sim={sim:.2f} "
@@ -2010,18 +2002,8 @@ def render_diary(state: State) -> str:
 def render_path(path_obj: dict | None) -> str:
     if not path_obj:
         return ""
-    sections = [
-        ("opening", "Начальная мысль"),
-        ("what_attracts_me", "Что меня притягивает"),
-        ("what_i_dislike", "Что мне не нравится"),
-        ("what_works", "Что у меня получается"),
-        ("where_i_stumble", "Где я спотыкаюсь"),
-        ("emerging_language", "Мой формирующийся язык"),
-        ("current_series", "Текущая серия"),
-        ("next_hypothesis", "Следующая гипотеза"),
-    ]
     lines = ["# Путь художника\n"]
-    for key, label in sections:
+    for key, label in PATH_FIELDS:
         val = path_obj.get(key)
         if not val:
             continue
@@ -2066,48 +2048,16 @@ def _ensure_open_series(
         "Предложи имя и тезис новой серии, которая осмысленно следует из "
         "прошлого пути. Также укажи:\n"
         "- must_differ_from_previous_in: массив ≥2 осей из "
-        "[palette, composition, shape_family, density, symmetry, "
-        "algorithmic_kernel, scale, texture], по которым эта серия "
+        f"[{', '.join(SERIES_DIFF_AXES)}], по которым эта серия "
         "обязана заметно отличаться от прошлых;\n"
         "- forbidden_features: список конкретных признаков, которые НЕ "
         "должны появляться в этой серии.\n"
         "Верни JSON с полями `name`, `thesis`, `must_differ_from_previous_in`, "
         "`forbidden_features`."
     )
-    schema = {
-        "name": "NewSeries",
-        "strict": True,
-        "schema": _obj(
-            {
-                "name": {"type": "string"},
-                "thesis": {"type": "string"},
-                "must_differ_from_previous_in": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": [
-                            "palette",
-                            "composition",
-                            "shape_family",
-                            "density",
-                            "symmetry",
-                            "algorithmic_kernel",
-                            "scale",
-                            "texture",
-                        ],
-                    },
-                    "minItems": 2,
-                },
-                "forbidden_features": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-            }
-        ),
-    }
     obj = llm_json(
         user,
-        schema,
+        SCHEMA_NEW_SERIES,
         temperature=0.7,
         max_tokens=800,
         tag=f"open_series_iter{at_iter:03d}",
@@ -2143,20 +2093,14 @@ def one_cycle(state: State) -> None:
     fingerprint = compute_fingerprint(png)
 
     # similarity to the immediately previous render (for step-4 grounding)
-    measured_sim: float | None = None
-    prev_fp: dict | None = None
-    if state.iterations:
-        prev_n = max(state.iterations)
-        prev_it = state.iterations.get(prev_n)
-        prev_fp = prev_it.get("fingerprint") if prev_it else None
-        if prev_fp is not None:
-            measured_sim = similarity(fingerprint, prev_fp)
-            log.info(
-                "    visual similarity to %03d: %.2f (%s)",
-                prev_n,
-                measured_sim,
-                similarity_bucket(measured_sim),
-            )
+    prev_n, _, measured_sim = previous_iteration_context(state, fingerprint)
+    if prev_n is not None and measured_sim is not None:
+        log.info(
+            "    visual similarity to %03d: %.2f (%s)",
+            prev_n,
+            measured_sim,
+            similarity_bucket(measured_sim),
+        )
 
     observation = step3_observe(ctx, png)
     diary = step4_diary(ctx, observation, measured_sim)
@@ -2228,6 +2172,8 @@ def one_cycle(state: State) -> None:
 
 
 def main() -> None:
+    args = _parse_args()
+    _bootstrap(args)
     log.info(
         "driver starting. model=%s vision=%s workdir=%s",
         MODEL,
