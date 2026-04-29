@@ -38,7 +38,7 @@ uv run make_video.py output
 
 ## English
 
-`img_gen` is an autonomous generative art experiment. An LLM writes `art.py`, renders an image, reflects on the result, groups works into series, and keeps a structured history of its artistic path.
+`BlueRider` is an autonomous generative art experiment. An LLM writes `art.py`, renders an image, reflects on the result, groups works into series, and keeps a structured history of its artistic path.
 
 ### Main parts
 
